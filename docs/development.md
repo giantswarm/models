@@ -7,7 +7,7 @@ The tool is one Go module: `main.go` is the `models` command, the packages under
 | `internal/spec` | reads and validates the specification files under `models/` |
 | `internal/hub` | the Hugging Face Hub: file list with sizes and LFS hashes, resumable file streams |
 | `internal/modelcar` | the weights layer as a deterministic tar stream, the two-platform image and its publication |
-| `internal/registry` | the resumable chunked blob upload (one PATCH per 256 MiB, resumed from the registry's offset) |
+| `internal/registry` | the resumable chunked blob upload (one PATCH per 256 MiB, resumed from the registry's offset; a commit the gateway times out on is followed by polling for the blob) |
 | `internal/sbom` | the SPDX document attested on every image |
 
 ```bash

@@ -318,7 +318,7 @@ func streamLayer(ctx context.Context, m *spec.ModelImage, files []hub.File, modT
 		_ = pw.CloseWithError(layer.WriteTo(ctx, pw, o.Hub))
 	}()
 	up := &registry.Uploader{
-		Repository: repo, Transport: rt, ChunkSize: o.ChunkSize,
+		Repository: repo, Transport: rt, ChunkSize: o.ChunkSize, Log: o.Log,
 		Progress: func(n int64) { prog.uploaded.Store(n) },
 	}
 	res, err := up.Upload(ctx, pr)
