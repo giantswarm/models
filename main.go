@@ -123,6 +123,7 @@ type publishFlags struct {
 	attestFile string
 	sbomDir    string
 	chunkMiB   int
+	layerGiB   int
 	interval   time.Duration
 }
 
@@ -132,8 +133,8 @@ func publishCommand() *cobra.Command {
 		Use:   "publish",
 		Short: "Build and push every image the registry does not hold yet",
 		Long: `publish builds the image of each specification whose tag is missing from the
-registry and pushes it: the weights stream from the Hub through one
-uncompressed tar layer into the registry, never onto local disk. A tag that
+registry and pushes it: the weights stream from the Hub through uncompressed
+tar layers of at most --layer-gib each into the registry, never onto local disk. A tag that
 already holds the specification's checkpoint is left alone; one that holds
 another checkpoint fails the run.
 
@@ -154,6 +155,7 @@ reference to --refs-file and, with an SPDX document per image written to
 	cmd.Flags().StringVar(&f.attestFile, "attest-file", "", "append '<ref> spdxjson <sbom>' per image to this file (for cosign attest)")
 	cmd.Flags().StringVar(&f.sbomDir, "sbom-dir", "", "write one SPDX document per image into this directory")
 	cmd.Flags().IntVar(&f.chunkMiB, "chunk-mib", 256, "size of one blob upload request in MiB")
+	cmd.Flags().IntVar(&f.layerGiB, "layer-gib", int(modelcar.DefaultMaxLayerSize>>30), "largest weights layer in GiB; the checkpoint is cut into layers of at most this size, files whole, in path order")
 	cmd.Flags().DurationVar(&f.interval, "progress-interval", 30*time.Second, "how often the transfer is logged")
 	return cmd
 }
@@ -189,7 +191,7 @@ func publish(ctx context.Context, f publishFlags, out io.Writer) error {
 	tool := userAgent()
 	opts := modelcar.Options{
 		Registry: registry, Hub: hub.New(tool), Auth: auth, Source: source, Tool: tool,
-		ChunkSize: f.chunkMiB << 20, ProgressInterval: f.interval, Log: logger.Printf,
+		ChunkSize: f.chunkMiB << 20, MaxLayerSize: int64(f.layerGiB) << 30, ProgressInterval: f.interval, Log: logger.Printf,
 	}
 	for _, m := range specs {
 		logger.Printf("%s: %s", m.Path, m.Metadata.Name)
