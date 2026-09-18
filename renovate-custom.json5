@@ -1,0 +1,36 @@
+{
+  // Repo-specific Renovate rules for giantswarm/models. Owned by the repo and
+  // pulled in as the last `extends` entry of the generated renovate.json5.
+  customManagers: [
+    {
+      // Every specification pins a Hugging Face commit. The Hub is a git
+      // remote, so the git-refs datasource follows the repository's default
+      // branch and bumps the pinned revision to its head; publish-models then
+      // builds the new image on merge.
+      customType: 'regex',
+      description: 'Hugging Face checkpoint revisions in the model specifications',
+      managerFilePatterns: ['/^models/.+\\.yaml$/'],
+      matchStrings: ['repository: (?<hfRepository>\\S+)\\s+revision: (?<currentDigest>[0-9a-f]{40})'],
+      currentValueTemplate: 'main',
+      depNameTemplate: '{{{hfRepository}}}',
+      packageNameTemplate: 'https://huggingface.co/{{{hfRepository}}}',
+      datasourceTemplate: 'git-refs',
+    },
+    {
+      // The modelcar's base image, pinned in code.
+      customType: 'regex',
+      description: 'base image of the model images',
+      managerFilePatterns: ['/^internal/spec/spec\\.go$/'],
+      matchStrings: ['// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+ = "[^"]+:(?<currentValue>[^"@]+)"'],
+      versioningTemplate: 'docker',
+    },
+  ],
+  packageRules: [
+    {
+      description: 'a checkpoint revision bump is a new model image: reviewed, never automerged',
+      matchDatasources: ['git-refs'],
+      automerge: false,
+      commitMessageTopic: 'checkpoint {{depName}}',
+    },
+  ],
+}

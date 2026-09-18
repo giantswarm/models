@@ -1,0 +1,79 @@
+# Repo-specific CircleCI jobs. The dynamic-config setup workflow in
+# .circleci/config.yml deep-merges this file into the generated
+# .circleci/workflows.yml at pipeline runtime (yq `*+`: maps merge, job lists
+# append). devctl never touches this file.
+#
+# What this file carries beyond the golden pipeline (go-build):
+#   - validate-models: every specification under models/ resolves on the Hub
+#     (the check a Renovate revision bump has to pass),
+#   - publish-models: on main, build and push every model image the registry
+#     does not hold yet, then sign it and attest its SBOM with the orb's
+#     cosign command -- the same CircleCI OIDC identity every other Giant Swarm
+#     image carries.
+version: 2.1
+
+jobs:
+  validate-models:
+    executor: architect/architect
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Resolve every specification on the Hub
+          command: go run . validate models
+
+  publish-models:
+    executor: architect/architect
+    # The weights never touch disk: each file streams from the Hub through
+    # the tar writer into the registry's chunked blob upload. Two 256 MiB
+    # chunks are in memory at a time; the rest is hashing and TLS, which is
+    # where the two vCPUs go.
+    resource_class: medium
+    steps:
+      - checkout
+      - run:
+          name: Build and push the model images the registry does not hold
+          # The tool logs the transfer every 30 s; a silent stall for longer
+          # than this is a hang worth ending.
+          no_output_timeout: 20m
+          command: |
+            set -euo pipefail
+            export MODELS_REGISTRY_USERNAME="${ACR_GSOCI_USERNAME}"
+            export MODELS_REGISTRY_PASSWORD="${ACR_GSOCI_PASSWORD}"
+            go build -o /tmp/models .
+            /tmp/models publish \
+              --registry gsoci.azurecr.io/giantswarm/models \
+              --refs-file /tmp/.cosign_refs \
+              --attest-file /tmp/.cosign_attest \
+              --sbom-dir /tmp/sbom
+            echo "Images to sign:"; cat /tmp/.cosign_refs
+            echo "SBOMs to attest:"; cat /tmp/.cosign_attest 2>/dev/null || echo "(none built in this run)"
+      # Keyless cosign under this pipeline's CircleCI OIDC identity, verified
+      # right after signing. Idempotent: an image signed by an earlier run
+      # gets "entry already exists" from Rekor and is skipped.
+      - architect/cosign-sign-verify:
+          kind: oci
+          refs_file: /tmp/.cosign_refs
+      - architect/cosign-sign-verify:
+          kind: attest
+          refs_file: /tmp/.cosign_attest
+      - store_artifacts:
+          path: /tmp/sbom
+          destination: sbom
+
+workflows:
+  build:
+    jobs:
+      - validate-models:
+          context: architect
+          filters:
+            tags:
+              only: /^v.*/
+      - publish-models:
+          context: architect
+          requires:
+            - go-build
+            - validate-models
+          filters:
+            branches:
+              only: main

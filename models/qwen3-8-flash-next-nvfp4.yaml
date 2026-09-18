@@ -1,0 +1,15 @@
+# Qwen3.8-Flash-Next, the quantization-aware-distilled NVFP4 repack: a 125B
+# mixture of experts with 6B active and a 51B n-gram embedding table, 98.6 GiB
+# on disk as 36 safetensors shards. Served by the agent platform's preset of
+# the same name on a single 128 GB unified-memory Blackwell node.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: qwen3-8-flash-next-nvfp4
+spec:
+  huggingFace:
+    repository: local-inference-lab/Qwen3.8-Flash-Next-NVFP4
+    revision: 7c4f1bc1a2d6847e0cbc01ac6b823f00251de8dd
+  description: Qwen3.8-Flash-Next (125B MoE, 6B active) as the quantization-aware-distilled NVFP4 repack with the n-gram table in NVFP4; 98.6 GiB, 36 safetensors shards.
+  # The Qwen community licence; not an SPDX identifier.
+  license: LicenseRef-Qwen
