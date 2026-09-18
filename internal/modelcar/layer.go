@@ -1,7 +1,8 @@
 // Package modelcar builds and publishes a model image: a base image with a
-// shell plus one uncompressed tar layer holding a Hugging Face checkpoint
-// under /models, as a two-platform index that both an amd64 and an arm64
-// node resolve to the same weights blob.
+// shell plus uncompressed tar layers holding a Hugging Face checkpoint under
+// /models -- as few layers as DefaultMaxLayerSize allows, files whole, in path
+// order -- as a two-platform index that both an amd64 and an arm64 node
+// resolve to the same weights blobs.
 package modelcar
 
 import (

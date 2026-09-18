@@ -36,10 +36,12 @@ a preset pins one exact checkpoint.
 
 ## What an image is
 
-- A two-platform index (`linux/amd64`, `linux/arm64`) whose manifests share **one uncompressed tar
-  layer** with the checkpoint's files under `/models` — safetensors do not compress, and a node's pull
-  is a copy instead of a decompression. Only the base layer, a busybox shell for KServe's modelcar
-  sidecar, differs per platform.
+- A two-platform index (`linux/amd64`, `linux/arm64`) whose manifests share the **uncompressed tar
+  layers** with the checkpoint's files under `/models` — safetensors do not compress, and a node's
+  pull is a copy instead of a decompression. The checkpoint is cut into as few layers as 8 GiB per layer
+  allows (files whole, in path order; `--layer-gib` changes the limit): a registry finalizes a blob in
+  time proportional to its size and a node pulls layers in parallel. Only the base layer, a busybox
+  shell for KServe's modelcar sidecar, differs per platform.
 - Every file is hashed as it streams; an LFS file whose bytes differ from the Hub's record fails the
   build. The hashes go into an SPDX document attested on the image (`cosign verify-attestation --type
   spdxjson`); the index carries the checkpoint's repository and revision as annotations.
@@ -57,13 +59,13 @@ registry's chunked blob upload, two 256 MiB chunks in memory at a time, resuming
 on either side from the last byte. That is why `publish-models` runs on the ordinary Docker executor
 with the `architect` image.
 
-After the last byte the registry finalizes the blob -- it hashes the hundred gigabytes it holds, which
-takes minutes -- and its gateway may give up on the commit request before that (Azure Container
-Registry answers 504 after eight minutes) while the registry keeps working. The tool names the layer's
-digest before the commit, polls for the blob by that digest after an unconfirmed commit, and sends the
-commit again only while the upload still exists with every byte. The layer is the same bytes on every
-build of a revision, so a blob an earlier run left committed is recognised at commit time and never
-committed twice.
+After a layer's last byte the registry finalizes the blob -- it hashes what it holds, which takes
+minutes for a large blob -- and its gateway may give up on the commit request before that (Azure
+Container Registry answers 504 after eight minutes, which one 106 GB layer did not fit; hence the 8 GiB
+limit) while the registry keeps working. The tool names each layer's digest before its commit, polls
+for the blob by that digest after an unconfirmed commit, and sends the commit again only while the
+upload still exists with every byte. A layer is the same bytes on every build of a revision, so a blob
+an earlier run left committed is recognised at commit time and never committed twice.
 
 ## Verifying an image
 

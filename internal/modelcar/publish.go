@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,8 +31,16 @@ const (
 	AnnotationRevision   = "io.giantswarm.models.huggingface.revision"
 	AnnotationFiles      = "io.giantswarm.models.files"
 	AnnotationWeights    = "io.giantswarm.models.weights.bytes"
+	AnnotationLayers     = "io.giantswarm.models.weights.layers"
 	AnnotationBase       = "io.giantswarm.models.base"
 )
+
+// DefaultMaxLayerSize bounds one weights layer. A registry finalizes a blob in
+// time proportional to its size -- Azure Container Registry's gateway gives up
+// after eight minutes, which a 106 GB blob does not fit -- and a node pulls
+// layers in parallel, so the checkpoint is cut into layers of at most this
+// many bytes, files whole, in path order.
+const DefaultMaxLayerSize = 8 << 30
 
 // Platforms every image is published for. The weights layer is shared; only
 // the base image's layer differs.
@@ -54,6 +64,8 @@ type Options struct {
 	Tool string
 	// ChunkSize is the blob upload's PATCH size; the uploader's default when zero.
 	ChunkSize int
+	// MaxLayerSize bounds one weights layer; DefaultMaxLayerSize when zero.
+	MaxLayerSize int64
 	// ProgressInterval is how often the transfer is logged; 30 s when zero.
 	ProgressInterval time.Duration
 	// Log receives progress lines.
@@ -70,8 +82,8 @@ type Published struct {
 	Digest v1.Hash
 	// Manifests are the per-platform image digests.
 	Manifests map[string]v1.Hash
-	// Layer is the weights layer's descriptor.
-	Layer v1.Descriptor
+	// Layers are the weights layers' descriptors, in image order.
+	Layers []v1.Descriptor
 	// Files lists what went into the layer, with hashes.
 	Files []FileDigest
 	// Base is the base image reference with its digest.
@@ -137,11 +149,14 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 	}
 
 	o.Log("building %s from %s@%s: %d files, %s, base %s", tag, m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision, len(files), humanBytes(total), baseRef)
-	layer, digests, err := streamLayer(ctx, m, files, rev.LastModified, total, repo, o)
+	layers, digests, err := streamLayers(ctx, m, files, rev.LastModified, total, repo, o)
 	if err != nil {
 		return nil, err
 	}
-	o.Log("weights layer %s (%s) is in the registry", layer.Digest, humanBytes(layer.Size))
+	var weights int64
+	for _, l := range layers {
+		weights += l.Size
+	}
 
 	labels := map[string]string{
 		"org.opencontainers.image.title":       m.Metadata.Name,
@@ -154,7 +169,8 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 		AnnotationRepository:                   m.Spec.HuggingFace.Repository,
 		AnnotationRevision:                     m.Spec.HuggingFace.Revision,
 		AnnotationFiles:                        fmt.Sprint(len(files)),
-		AnnotationWeights:                      fmt.Sprint(layer.Size),
+		AnnotationWeights:                      fmt.Sprint(weights),
+		AnnotationLayers:                       fmt.Sprint(len(layers)),
 		AnnotationBase:                         baseRef,
 	}
 	for k, v := range labels {
@@ -166,7 +182,7 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 	idx := mutate.IndexMediaType(empty.Index, types.OCIImageIndex)
 	manifests := map[string]v1.Hash{}
 	for _, b := range bases {
-		img, err := appendWeights(b.image, layer, labels, rev.LastModified, o.Tool, m)
+		img, err := appendWeights(b.image, layers, labels, rev.LastModified, o.Tool, m)
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +203,7 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 	}
 	o.Log("pushed %s@%s (%d platforms)", tag, indexDigest, len(manifests))
 	return &Published{
-		Reference: tag, Digest: indexDigest, Manifests: manifests, Layer: layer, Files: digests,
+		Reference: tag, Digest: indexDigest, Manifests: manifests, Layers: layers, Files: digests,
 		Base: baseRef, Created: rev.LastModified,
 	}, nil
 }
@@ -242,9 +258,16 @@ func existing(m *spec.ModelImage, tag name.Tag, opts []remote.Option) (*Publishe
 		if err != nil {
 			return nil, err
 		}
-		last := layers[len(layers)-1]
-		if p.Layer, err = descriptor(last); err != nil {
-			return nil, err
+		n := 1
+		if v, err := strconv.Atoi(im.Annotations[AnnotationLayers]); err == nil && v > 0 && v <= len(layers) {
+			n = v
+		}
+		for _, l := range layers[len(layers)-n:] {
+			d, err := descriptor(l)
+			if err != nil {
+				return nil, err
+			}
+			p.Layers = append(p.Layers, d)
 		}
 	}
 	return p, nil
@@ -294,54 +317,93 @@ func baseImages(ctx context.Context, ref string, opts []remote.Option) ([]base, 
 	return bases, pinned, nil
 }
 
-// streamLayer streams the checkpoint into the registry as one uncompressed
-// tar blob and returns its descriptor and the per-file hashes.
-func streamLayer(ctx context.Context, m *spec.ModelImage, files []hub.File, modTime time.Time, total int64, repo name.Repository, o Options) (v1.Descriptor, []FileDigest, error) {
+// streamLayers streams the checkpoint into the registry as uncompressed tar
+// blobs of at most o.MaxLayerSize each, one after the other, and returns
+// their descriptors and the per-file hashes.
+func streamLayers(ctx context.Context, m *spec.ModelImage, files []hub.File, modTime time.Time, total int64, repo name.Repository, o Options) ([]v1.Descriptor, []FileDigest, error) {
 	rt, err := transport.NewWithContext(ctx, repo.Registry, o.Auth, o.Transport, []string{repo.Scope(transport.PushScope)})
 	if err != nil {
-		return v1.Descriptor{}, nil, err
+		return nil, nil, err
 	}
 	prog := &progress{total: total, started: time.Now(), log: o.Log}
 	progCtx, stopProgress := context.WithCancel(ctx)
 	defer stopProgress()
 	go prog.run(progCtx, o.ProgressInterval)
 
+	groups := groupFiles(files, o.MaxLayerSize)
 	var digests []FileDigest
-	layer := &Layer{
-		Repository: m.Spec.HuggingFace.Repository, Revision: m.Spec.HuggingFace.Revision,
-		Files: files, ModTime: modTime, Root: spec.MountPath,
-		Written: func(d FileDigest) { digests = append(digests, d) },
-		Read:    func(n int) { prog.downloaded.Add(int64(n)) },
-	}
-	pr, pw := io.Pipe()
-	go func() {
-		_ = pw.CloseWithError(layer.WriteTo(ctx, pw, o.Hub))
-	}()
-	up := &registry.Uploader{
-		Repository: repo, Transport: rt, ChunkSize: o.ChunkSize, Log: o.Log,
-		Progress: func(n int64) { prog.uploaded.Store(n) },
-	}
-	res, err := up.Upload(ctx, pr)
-	if err != nil {
-		_ = pr.CloseWithError(err)
-		return v1.Descriptor{}, nil, fmt.Errorf("streaming the weights layer: %w", err)
+	var layers []v1.Descriptor
+	var done int64
+	for i, group := range groups {
+		layer := &Layer{
+			Repository: m.Spec.HuggingFace.Repository, Revision: m.Spec.HuggingFace.Revision,
+			Files: group, ModTime: modTime, Root: spec.MountPath,
+			Written: func(d FileDigest) { digests = append(digests, d) },
+			Read:    func(n int) { prog.downloaded.Add(int64(n)) },
+		}
+		pr, pw := io.Pipe()
+		go func() {
+			_ = pw.CloseWithError(layer.WriteTo(ctx, pw, o.Hub))
+		}()
+		up := &registry.Uploader{
+			Repository: repo, Transport: rt, ChunkSize: o.ChunkSize, Log: o.Log,
+			Progress: func(n int64) { prog.uploaded.Store(done + n) },
+		}
+		res, err := up.Upload(ctx, pr)
+		if err != nil {
+			_ = pr.CloseWithError(err)
+			return nil, nil, fmt.Errorf("streaming weights layer %d of %d: %w", i+1, len(groups), err)
+		}
+		done += res.Size
+		layers = append(layers, v1.Descriptor{MediaType: types.OCIUncompressedLayer, Digest: res.Digest, Size: res.Size})
+		o.Log("weights layer %d of %d, %s (%s, %d files), is in the registry", i+1, len(groups), res.Digest, humanBytes(res.Size), len(group))
 	}
 	stopProgress()
 	prog.report()
-	return v1.Descriptor{MediaType: types.OCIUncompressedLayer, Digest: res.Digest, Size: res.Size}, digests, nil
+	return layers, digests, nil
 }
 
-// appendWeights adds the (already uploaded) weights layer to a base image and
+// groupFiles cuts the files, in path order, into runs of at most limit bytes;
+// a file larger than the limit is a run of its own. The cut is a function of
+// the file list alone, so every build of a revision yields the same layers.
+func groupFiles(files []hub.File, limit int64) [][]hub.File {
+	if limit <= 0 {
+		limit = DefaultMaxLayerSize
+	}
+	sorted := append([]hub.File(nil), files...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	var groups [][]hub.File
+	var current []hub.File
+	var size int64
+	for _, f := range sorted {
+		if len(current) > 0 && size+f.Size > limit {
+			groups = append(groups, current)
+			current, size = nil, 0
+		}
+		current = append(current, f)
+		size += f.Size
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
+}
+
+// appendWeights adds the (already uploaded) weights layers to a base image and
 // records the checkpoint in the config.
-func appendWeights(b v1.Image, layer v1.Descriptor, labels map[string]string, created time.Time, tool string, m *spec.ModelImage) (v1.Image, error) {
-	img, err := mutate.Append(b, mutate.Addendum{
-		Layer: &existingLayer{desc: layer},
-		History: v1.History{
-			Created:   v1.Time{Time: created},
-			CreatedBy: fmt.Sprintf("%s publish %s", tool, m.Metadata.Name),
-			Comment:   fmt.Sprintf("%s@%s under /%s", m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision, spec.MountPath),
-		},
-	})
+func appendWeights(b v1.Image, layers []v1.Descriptor, labels map[string]string, created time.Time, tool string, m *spec.ModelImage) (v1.Image, error) {
+	var adds []mutate.Addendum
+	for i, layer := range layers {
+		adds = append(adds, mutate.Addendum{
+			Layer: &existingLayer{desc: layer},
+			History: v1.History{
+				Created:   v1.Time{Time: created},
+				CreatedBy: fmt.Sprintf("%s publish %s", tool, m.Metadata.Name),
+				Comment:   fmt.Sprintf("%s@%s under /%s, layer %d of %d", m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision, spec.MountPath, i+1, len(layers)),
+			},
+		})
+	}
+	img, err := mutate.Append(b, adds...)
 	if err != nil {
 		return nil, err
 	}

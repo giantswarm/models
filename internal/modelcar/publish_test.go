@@ -154,7 +154,7 @@ func setup(t *testing.T) (spec.ModelImage, Options, *fakeHub) {
 	return m, o, h
 }
 
-func TestPublishBuildsATwoPlatformIndexWithOneUncompressedLayer(t *testing.T) {
+func TestPublishBuildsATwoPlatformIndexWithUncompressedLayers(t *testing.T) {
 	m, o, h := setup(t)
 	ctx := context.Background()
 	p, err := Publish(ctx, &m, o)
@@ -225,22 +225,118 @@ func TestPublishBuildsATwoPlatformIndexWithOneUncompressedLayer(t *testing.T) {
 		}
 		checkTar(t, rc, h)
 	}
-	if weightsDigests[0] != weightsDigests[1] || weightsDigests[0] != p.Layer.Digest {
-		t.Errorf("the platforms must share one weights layer: %v vs %v", weightsDigests, p.Layer.Digest)
+	if len(p.Layers) != 1 || weightsDigests[0] != weightsDigests[1] || weightsDigests[0] != p.Layers[0].Digest {
+		t.Errorf("the platforms must share one weights layer: %v vs %v", weightsDigests, p.Layers)
+	}
+	if im.Annotations[AnnotationLayers] != "1" || im.Annotations[AnnotationWeights] != fmt.Sprint(p.Layers[0].Size) {
+		t.Errorf("layer annotations: %v", im.Annotations)
 	}
 
 	again, err := Publish(ctx, &m, o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !again.Existed || again.Digest != p.Digest || again.Layer.Digest != p.Layer.Digest {
-		t.Errorf("second publication: existed=%v digest=%s layer=%s; want the first's %s / %s", again.Existed, again.Digest, again.Layer.Digest, p.Digest, p.Layer.Digest)
+	if !again.Existed || again.Digest != p.Digest || len(again.Layers) != 1 || again.Layers[0].Digest != p.Layers[0].Digest {
+		t.Errorf("second publication: existed=%v digest=%s layers=%v; want the first's %s / %v", again.Existed, again.Digest, again.Layers, p.Digest, p.Layers)
 	}
 
 	other := m
 	other.Spec.HuggingFace.Revision = "7c4f1bc1a2d6" + strings.Repeat("0", 28)
 	if _, err := Publish(ctx, &other, o); err == nil || !strings.Contains(err.Error(), "never re-pushed") {
 		t.Errorf("a tag holding another revision must be refused, got %v", err)
+	}
+}
+
+func TestPublishCutsTheWeightsIntoLayersUnderTheLimit(t *testing.T) {
+	m, o, h := setup(t)
+	o.MaxLayerSize = 2 << 20 // config.json | model.safetensors (3 MiB, alone) | sub/dir/tok.json
+	ctx := context.Background()
+	p, err := Publish(ctx, &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Layers) != 3 || len(p.Files) != 3 {
+		t.Fatalf("layers = %v, files = %d", p.Layers, len(p.Files))
+	}
+	idx, err := remote.Index(p.Reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := idx.IndexManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if im.Annotations[AnnotationLayers] != "3" {
+		t.Errorf("annotations: %v", im.Annotations)
+	}
+	var total int64
+	for _, l := range p.Layers {
+		total += l.Size
+	}
+	if im.Annotations[AnnotationWeights] != fmt.Sprint(total) {
+		t.Errorf("weights annotation %q, want %d", im.Annotations[AnnotationWeights], total)
+	}
+	for _, d := range im.Manifests {
+		img, err := idx.Image(d.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		layers, err := img.Layers()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(layers) != 4 {
+			t.Fatalf("%s: %d layers", d.Platform, len(layers))
+		}
+		var names []string
+		for i, l := range layers[1:] {
+			rc, err := l.Uncompressed()
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries := tarEntries(t, rc, h)
+			if entries[0] != root {
+				t.Errorf("layer %d starts with %q", i+1, entries[0])
+			}
+			names = append(names, entries...)
+		}
+		want := []string{root, "models/config.json", root, "models/model.safetensors", root, "models/sub/", "models/sub/dir/", "models/sub/dir/tok.json"}
+		if strings.Join(names, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: entries across the layers = %v, want %v", d.Platform, names, want)
+		}
+		cf, err := img.ConfigFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if last := cf.History[len(cf.History)-1]; !strings.Contains(last.Comment, "layer 3 of 3") {
+			t.Errorf("history = %+v", last)
+		}
+	}
+	again, err := Publish(ctx, &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Existed || len(again.Layers) != 3 || again.Layers[2].Digest != p.Layers[2].Digest {
+		t.Errorf("second publication: %+v", again)
+	}
+}
+
+func TestGroupFiles(t *testing.T) {
+	files := []hub.File{{Path: "b", Size: 5}, {Path: "a", Size: 5}, {Path: "c", Size: 20}, {Path: "d", Size: 1}, {Path: "e", Size: 9}}
+	groups := groupFiles(files, 10)
+	var got []string
+	for _, g := range groups {
+		var names []string
+		for _, f := range g {
+			names = append(names, f.Path)
+		}
+		got = append(got, strings.Join(names, "+"))
+	}
+	if want := "a+b,c,d+e"; strings.Join(got, ",") != want {
+		t.Errorf("groupFiles = %v, want %s", got, want)
+	}
+	if n := len(groupFiles(files, 0)); n != 1 {
+		t.Errorf("no limit: %d groups, want 1", n)
 	}
 }
 
@@ -254,8 +350,22 @@ func TestPublishRefusesACorruptedFile(t *testing.T) {
 	}
 }
 
-// checkTar reads the weights layer back and checks its entries.
+// checkTar reads the one weights layer back and checks its entries.
 func checkTar(t *testing.T, rc io.ReadCloser, h *fakeHub) {
+	t.Helper()
+	names := tarEntries(t, rc, h)
+	want := []string{root, "models/config.json", "models/model.safetensors", "models/sub/", "models/sub/dir/", "models/sub/dir/tok.json"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("tar entries = %v, want %v", names, want)
+	}
+}
+
+// root is the directory entry every weights layer starts with.
+const root = spec.MountPath + "/"
+
+// tarEntries reads a weights layer back, checks every file against the Hub's
+// content and returns the entry names in order.
+func tarEntries(t *testing.T, rc io.ReadCloser, h *fakeHub) []string {
 	t.Helper()
 	defer func() { _ = rc.Close() }()
 	tr := tar.NewReader(rc)
@@ -274,7 +384,7 @@ func checkTar(t *testing.T, rc io.ReadCloser, h *fakeHub) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Equal(content, h.files[strings.TrimPrefix(hdr.Name, "models/")]) {
+			if !bytes.Equal(content, h.files[strings.TrimPrefix(hdr.Name, root)]) {
 				t.Errorf("%s: content differs", hdr.Name)
 			}
 			if hdr.Mode != 0o644 || hdr.Uid != 0 || !hdr.ModTime.Equal(time.Date(2026, 9, 16, 20, 9, 45, 0, time.UTC)) {
@@ -282,10 +392,7 @@ func checkTar(t *testing.T, rc io.ReadCloser, h *fakeHub) {
 			}
 		}
 	}
-	want := []string{"models/", "models/config.json", "models/model.safetensors", "models/sub/", "models/sub/dir/", "models/sub/dir/tok.json"}
-	if strings.Join(names, ",") != strings.Join(want, ",") {
-		t.Errorf("tar entries = %v, want %v", names, want)
-	}
+	return names
 }
 
 func TestHumanBytes(t *testing.T) {
