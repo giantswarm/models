@@ -1,7 +1,9 @@
 // Package registry uploads one blob to an OCI registry in resumable chunks:
 // the weights layer of a model image is tens of gigabytes long and streams
 // straight from the Hub, so a dropped connection must cost one chunk, not the
-// whole transfer.
+// whole transfer, and the registry's own finalization of the blob -- minutes
+// of hashing after the last byte, longer than a gateway waits for one request
+// -- must not cost the transfer either.
 package registry
 
 import (
@@ -42,9 +44,22 @@ type Uploader struct {
 	Backoff time.Duration
 	// RequestTimeout bounds one PATCH; 15 minutes when zero.
 	RequestTimeout time.Duration
+	// CommitAttempts bounds the PUTs that close the upload; 2 when zero.
+	CommitAttempts int
+	// CommitTimeout bounds one such PUT; 30 minutes when zero. A gateway in
+	// front of the registry usually gives up earlier.
+	CommitTimeout time.Duration
+	// FinalizeWait is how long, after a commit the registry did not answer
+	// with success, the blob is polled for by digest before the commit is
+	// tried again; 30 minutes when zero.
+	FinalizeWait time.Duration
+	// PollInterval is the pause between two of those polls; 30 seconds when zero.
+	PollInterval time.Duration
 	// Progress, when set, is told the number of bytes the registry has
 	// acknowledged so far after every chunk.
 	Progress func(uploaded int64)
+	// Log, when set, receives one line per commit attempt and poll.
+	Log func(format string, args ...any)
 }
 
 // Result describes the uploaded blob.
@@ -128,7 +143,7 @@ func (u *Uploader) Upload(ctx context.Context, r io.Reader) (Result, error) {
 		return Result{}, fmt.Errorf("reading the blob: %w", err)
 	}
 	digest := v1.Hash{Algorithm: "sha256", Hex: hex.EncodeToString(hash.Sum(nil))}
-	if err := u.commit(ctx, location, digest); err != nil {
+	if err := u.commit(ctx, location, digest, offset); err != nil {
 		return Result{}, err
 	}
 	return Result{Digest: digest, Size: offset}, nil
@@ -244,12 +259,80 @@ func (u *Uploader) status(ctx context.Context, location *url.URL) (int64, *url.U
 	return held, loc, nil
 }
 
-func (u *Uploader) commit(ctx context.Context, location *url.URL, digest v1.Hash) error {
+// commit closes the upload as the blob with the digest. A registry storing a
+// blob of tens of gigabytes takes minutes to finalize it after the last byte
+// (it hashes what it holds), and a gateway in front of it can give up on the
+// request first while the registry keeps working: Azure Container Registry
+// answers 504 after eight minutes. So a commit the registry does not confirm
+// is followed by polling for the blob by digest, and by another PUT only while
+// the upload still exists with every byte. A blob the registry already holds
+// under the digest -- a previous run's commit that outlived its 504 -- is
+// recognised first; the layer is the same bytes on every build.
+func (u *Uploader) commit(ctx context.Context, location *url.URL, digest v1.Hash, size int64) error {
+	attempts := u.CommitAttempts
+	if attempts <= 0 {
+		attempts = 2
+	}
+	wait := u.FinalizeWait
+	if wait <= 0 {
+		wait = 30 * time.Minute
+	}
+	if exists, err := u.blobExists(ctx, digest); err == nil && exists {
+		u.logf("the registry already holds %s (%s); the upload is discarded", digest, gib(size))
+		u.abandon(ctx, location)
+		return nil
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		u.logf("committing %s (%s), attempt %d of %d", digest, gib(size), attempt, attempts)
+		err := u.put(ctx, location, digest)
+		if err == nil {
+			return nil
+		}
+		// A retried commit can find the upload gone because the first one
+		// landed after all; a rejection of the first commit is final.
+		if exists, herr := u.blobExists(ctx, digest); herr == nil && exists {
+			u.logf("the registry holds %s", digest)
+			return nil
+		}
+		if attempt == 1 && permanent(err) {
+			return err
+		}
+		lastErr = err
+		u.logf("%v; polling for the blob for up to %s while the registry finalizes it", err, wait)
+		held, err := u.awaitBlob(ctx, digest, wait)
+		if err != nil {
+			return err
+		}
+		if held {
+			u.logf("the registry holds %s", digest)
+			return nil
+		}
+		stored, loc, err := u.status(ctx, location)
+		if err != nil {
+			return fmt.Errorf("the blob did not appear after the failed commit (%v), and the upload: %w", lastErr, err)
+		}
+		if stored != size {
+			return fmt.Errorf("the blob did not appear after the failed commit (%v), and the registry holds %d bytes of the upload, not %d", lastErr, stored, size)
+		}
+		location = loc
+	}
+	return fmt.Errorf("giving up on the commit after %d attempts: %w", attempts, lastErr)
+}
+
+// put is one PUT that closes the upload.
+func (u *Uploader) put(ctx context.Context, location *url.URL, digest v1.Hash) error {
+	timeout := u.CommitTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
 	q := location.Query()
 	q.Set("digest", digest.String())
 	final := *location
 	final.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, final.String(), http.NoBody)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut, final.String(), http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -263,6 +346,89 @@ func (u *Uploader) commit(ctx context.Context, location *url.URL, digest v1.Hash
 		return responseError("committing the blob", resp)
 	}
 	return nil
+}
+
+// permanent reports an answer to the first commit that no waiting changes: a
+// 4xx other than the ones that mean "later".
+func permanent(err error) bool {
+	var se *StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.Status {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	}
+	return se.Status >= 400 && se.Status < 500
+}
+
+// awaitBlob polls for the blob until it is there or the wait is over.
+func (u *Uploader) awaitBlob(ctx context.Context, digest v1.Hash, wait time.Duration) (bool, error) {
+	interval := u.PollInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(interval):
+		}
+		exists, err := u.blobExists(ctx, digest)
+		switch {
+		case err != nil:
+			u.logf("asking for %s: %v", digest, err)
+		case exists:
+			return true, nil
+		default:
+			u.logf("%s is not there yet, %s left", digest, time.Until(deadline).Round(time.Second))
+		}
+	}
+	return false, nil
+}
+
+// blobExists asks the repository for the blob.
+func (u *Uploader) blobExists(ctx context.Context, digest v1.Hash) (bool, error) {
+	endpoint := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", u.Repository.Scheme(), u.Repository.RegistryStr(), u.Repository.RepositoryStr(), digest)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, http.NoBody)
+	if err != nil {
+		return false, err
+	}
+	resp, err := u.do(req)
+	if err != nil {
+		return false, err
+	}
+	_ = resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	}
+	return false, fmt.Errorf("the registry answered %d", resp.StatusCode)
+}
+
+// abandon cancels an upload the blob makes unnecessary; a registry that has
+// already dropped it answers 404, which is fine.
+func (u *Uploader) abandon(ctx context.Context, location *url.URL) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, location.String(), http.NoBody)
+	if err != nil {
+		return
+	}
+	if resp, err := u.do(req); err == nil {
+		_ = resp.Body.Close()
+	}
+}
+
+func (u *Uploader) logf(format string, args ...any) {
+	if u.Log != nil {
+		u.Log(format, args...)
+	}
+}
+
+func gib(n int64) string {
+	return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
 }
 
 func (u *Uploader) do(req *http.Request) (*http.Response, error) {
