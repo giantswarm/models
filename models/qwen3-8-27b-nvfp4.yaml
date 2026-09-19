@@ -1,0 +1,14 @@
+# Qwen3.8-27B, NVIDIA's NVFP4 quantization of the 27B dense model with
+# TensorRT Model Optimizer: 20.4 GiB on disk as 3 safetensors shards. One
+# image for a 48 GB card and for a 128 GB unified-memory Blackwell node; the
+# platform's default open-weight preset on 48 GB.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: qwen3-8-27b-nvfp4
+spec:
+  huggingFace:
+    repository: nvidia/Qwen3.8-27B-NVFP4
+    revision: 482ca0f3832238542f8f5295dde86b5f22711d80
+  description: Qwen3.8-27B (27B dense) as NVIDIA's NVFP4 quantization with TensorRT Model Optimizer; 20.4 GiB, 3 safetensors shards.
+  license: Apache-2.0

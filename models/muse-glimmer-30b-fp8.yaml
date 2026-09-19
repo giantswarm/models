@@ -1,0 +1,13 @@
+# Muse Glimmer 30B, Red Hat AI's FP8 block quantization of the 30B dense model
+# in the compressed-tensors format: 32.0 GiB on disk as 2 safetensors shards,
+# a 32k context. Served beside the default on a 48 GB card.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: muse-glimmer-30b-fp8
+spec:
+  huggingFace:
+    repository: RedHatAI/Muse-Glimmer-30B-FP8-block
+    revision: 1deb4641ff84f9a728dd11b27cac1f6a02a9ed14
+  description: Muse Glimmer 30B (30B dense) as Red Hat AI's FP8 block quantization (compressed-tensors); 32.0 GiB, 2 safetensors shards, 32k context.
+  license: Apache-2.0

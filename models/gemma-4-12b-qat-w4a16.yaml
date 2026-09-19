@@ -1,0 +1,13 @@
+# Gemma 4 12B instruction-tuned, Google's quantization-aware-trained W4A16
+# checkpoint in the compressed-tensors format: 9.6 GiB on disk as a single
+# safetensors file. Sized for a 24 GB card.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: gemma-4-12b-qat-w4a16
+spec:
+  huggingFace:
+    repository: google/gemma-4-12B-it-qat-w4a16-ct
+    revision: 1d2c2d7f2466070e69d6fb3fd5ce9a7d75f2f6ee
+  description: Gemma 4 12B instruction-tuned as Google's quantization-aware-trained W4A16 checkpoint (compressed-tensors); 9.6 GiB, one safetensors file.
+  license: Apache-2.0
