@@ -1,0 +1,20 @@
+# Mistral Small 4, Mistral's official NVFP4 checkpoint of the 119B mixture of
+# experts with 6.5B active (128 experts, 4 routed plus one shared; 256k
+# context; text and image input): 65.9 GiB on disk as 13 consolidated
+# safetensors shards. The checkpoint is in Mistral's own file format, not the
+# Transformers layout: consolidated-*.safetensors, params.json in place of
+# config.json, and the tekken tokenizer (tekken.json); vLLM reads it with
+# --tokenizer-mode mistral --config-format mistral --load-format mistral, which
+# the preset passes. All 23 files sit at the top level, so the default exclude
+# list applies. Sized for a four-GPU node of 48 GB cards or a 128 GB Blackwell
+# node.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: mistral-small-4-nvfp4
+spec:
+  huggingFace:
+    repository: mistralai/Mistral-Small-4-119B-2603-NVFP4
+    revision: 45331841b631f4e281df8e959ea3cc9beb84298a
+  description: Mistral Small 4 (119B MoE, 6.5B active) as Mistral's official NVFP4 checkpoint in Mistral's own file format (consolidated safetensors, params.json, tekken tokenizer); 65.9 GiB, 13 safetensors shards, 256k context, text and image input.
+  license: Apache-2.0

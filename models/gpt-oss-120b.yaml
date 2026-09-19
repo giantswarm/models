@@ -1,0 +1,17 @@
+# gpt-oss-120b, OpenAI's open-weight 117B mixture of experts with 5.1B active,
+# published natively in MXFP4: 60.8 GiB served from 15 safetensors shards. The
+# repository's original/ (the reference checkpoint) and metal/ (the Apple
+# Silicon build) hold 60.8 GiB each that no vLLM server reads; both stay out.
+# Sized for a four-GPU node of 48 GB cards or a 128 GB Blackwell node.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: gpt-oss-120b
+spec:
+  huggingFace:
+    repository: openai/gpt-oss-120b
+    revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
+  description: gpt-oss-120b (117B MoE, 5.1B active) in OpenAI's native MXFP4; 60.8 GiB, 15 safetensors shards, without the original/ and metal/ copies.
+  license: Apache-2.0
+  # The default list plus the two directories; exclude replaces the default.
+  exclude: [README.md, .gitattributes, "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.webp", "original/*", "metal/*"]
