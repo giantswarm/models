@@ -239,6 +239,13 @@ func TestPublishBuildsATwoPlatformIndexWithUncompressedLayers(t *testing.T) {
 	if !again.Existed || again.Digest != p.Digest || len(again.Layers) != 1 || again.Layers[0].Digest != p.Layers[0].Digest {
 		t.Errorf("second publication: existed=%v digest=%s layers=%v; want the first's %s / %v", again.Existed, again.Digest, again.Layers, p.Digest, p.Layers)
 	}
+	files, err := Files(ctx, &m, o.Hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(files) != fmt.Sprint(p.Files) {
+		t.Errorf("Files() = %v, the build wrote %v", files, p.Files)
+	}
 
 	other := m
 	other.Spec.HuggingFace.Revision = "7c4f1bc1a2d6" + strings.Repeat("0", 28)

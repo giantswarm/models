@@ -143,7 +143,9 @@ Docker credential store when they are unset.
 
 For the signing steps that follow, publish appends every image's digest
 reference to --refs-file and, with an SPDX document per image written to
---sbom-dir, a "<ref> spdxjson <file>" line to --attest-file.`,
+--sbom-dir, a "<ref> spdxjson <file>" line to --attest-file -- for an image
+found already published as well, so a run signs and attests what an earlier
+one left unsigned; the steps skip what already verifies.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return publish(cmd.Context(), f, cmd.OutOrStdout())
 		},
@@ -205,8 +207,12 @@ func publish(ctx context.Context, f publishFlags, out io.Writer) error {
 		}
 		if f.sbomDir != "" && f.attestFile != "" {
 			if p.Existed {
-				logger.Printf("%s: the image existed before this run; its SBOM was attested when it was built", m.Metadata.Name)
-				continue
+				// The signing steps attest only what is not attested yet; the
+				// document they would attest is the one a build produces.
+				if p.Files, err = modelcar.Files(ctx, m, opts.Hub); err != nil {
+					return fmt.Errorf("%s: %w", m.Path, err)
+				}
+				logger.Printf("%s: the image existed before this run; its SBOM is rebuilt from the Hub's record", m.Metadata.Name)
 			}
 			doc, err := sbom.Build(m, p, tool, time.Now()).JSON()
 			if err != nil {

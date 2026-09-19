@@ -7,9 +7,10 @@
 #   - validate-models: every specification under models/ resolves on the Hub
 #     (the check a Renovate revision bump has to pass),
 #   - publish-models: on main, build and push every model image the registry
-#     does not hold yet, then sign it and attest its SBOM with the orb's
-#     cosign command -- the same CircleCI OIDC identity every other Giant Swarm
-#     image carries.
+#     does not hold yet, then sign every image that is not signed and attest
+#     the SBOM of every image that is not attested with the orb's cosign
+#     command -- the same CircleCI OIDC identity every other Giant Swarm image
+#     carries.
 version: 2.1
 
 jobs:
@@ -29,8 +30,19 @@ jobs:
     # chunks are in memory at a time; the rest is hashing and TLS, which is
     # where the two vCPUs go.
     resource_class: medium
+    environment:
+      # One login serves the tool (it falls back to the Docker keychain) and
+      # cosign (it reads $DOCKER_CONFIG/config.json to push the signature).
+      DOCKER_CONFIG: /tmp/.docker
     steps:
       - checkout
+      - run:
+          name: Log in to gsoci.azurecr.io
+          command: |
+            set -euo pipefail
+            mkdir -p "${DOCKER_CONFIG}"
+            jq -n --arg auth "$(printf '%s:%s' "${ACR_GSOCI_USERNAME}" "${ACR_GSOCI_PASSWORD}" | base64 | tr -d '\n')" \
+              '{auths: {"gsoci.azurecr.io": {auth: $auth}}}' > "${DOCKER_CONFIG}/config.json"
       - run:
           name: Build and push the model images the registry does not hold
           # The tool logs the transfer every 30 s; a silent stall for longer
@@ -38,19 +50,50 @@ jobs:
           no_output_timeout: 20m
           command: |
             set -euo pipefail
-            export MODELS_REGISTRY_USERNAME="${ACR_GSOCI_USERNAME}"
-            export MODELS_REGISTRY_PASSWORD="${ACR_GSOCI_PASSWORD}"
             go build -o /tmp/models .
             /tmp/models publish \
               --registry gsoci.azurecr.io/giantswarm/models \
               --refs-file /tmp/.cosign_refs \
               --attest-file /tmp/.cosign_attest \
               --sbom-dir /tmp/sbom
-            echo "Images to sign:"; cat /tmp/.cosign_refs
-            echo "SBOMs to attest:"; cat /tmp/.cosign_attest 2>/dev/null || echo "(none built in this run)"
+      - run:
+          name: Keep only what is not signed or attested yet
+          # The tool lists every image of every specification, built in this
+          # run or found already published, so a run repairs what an earlier
+          # one left unsigned. Keyless signatures are never identical, so the
+          # guard against signing twice is verifying first, as the orb's own
+          # identity check does.
+          command: |
+            set -euo pipefail
+            ISSUER_REGEX='^https://oidc\.circleci\.com'
+            IDENTITY_REGEX='^https://circleci\.com/api/v2/projects/[a-f0-9-]+/pipeline-definitions/[a-f0-9-]+$'
+            keep_unverified() { # <file> <kind: oci|attest>
+              local file="$1" kind="$2" todo="$1.todo" ref type predicate
+              [[ -s "$file" ]] || return 0
+              : > "$todo"
+              while read -r ref type predicate; do
+                [[ -n "$ref" ]] || continue
+                if [[ "$kind" == oci ]]; then
+                  if cosign verify --certificate-oidc-issuer-regexp "$ISSUER_REGEX" --certificate-identity-regexp "$IDENTITY_REGEX" "$ref" >/dev/null 2>&1; then
+                    echo "signed already: $ref"; continue
+                  fi
+                  echo "$ref" >> "$todo"
+                else
+                  if cosign verify-attestation --type "$type" --certificate-oidc-issuer-regexp "$ISSUER_REGEX" --certificate-identity-regexp "$IDENTITY_REGEX" "$ref" >/dev/null 2>&1; then
+                    echo "attested already ($type): $ref"; continue
+                  fi
+                  echo "$ref $type $predicate" >> "$todo"
+                fi
+              done < "$file"
+              mv "$todo" "$file"
+            }
+            keep_unverified /tmp/.cosign_refs oci
+            keep_unverified /tmp/.cosign_attest attest
+            echo "Images to sign:"; cat /tmp/.cosign_refs 2>/dev/null || echo "(none)"
+            echo "SBOMs to attest:"; cat /tmp/.cosign_attest 2>/dev/null || echo "(none)"
       # Keyless cosign under this pipeline's CircleCI OIDC identity, verified
-      # right after signing. Idempotent: an image signed by an earlier run
-      # gets "entry already exists" from Rekor and is skipped.
+      # right after signing: a Sigstore bundle referrer on the index, the shape
+      # every orb-built image carries.
       - architect/cosign-sign-verify:
           kind: oci
           refs_file: /tmp/.cosign_refs
