@@ -49,7 +49,9 @@ a preset pins one exact checkpoint.
   `https://oidc.circleci.com`, subject `https://circleci.com/api/v2/projects/<project>/pipeline-definitions/<definition>`),
   as a Sigstore bundle referrer — the same shape as every image the architect orb publishes.
 - A tag is never re-pushed with other content: a run finds the tag holding its checkpoint and moves
-  on; a tag holding another checkpoint fails the run.
+  on; a tag holding another checkpoint fails the run. What a run does repair is a missing signature or
+  attestation: an image found already published is listed for signing with its SBOM rebuilt from the
+  Hub's record, and the job signs and attests only what does not verify yet.
 
 ## How the build fits a hosted CI executor
 
