@@ -1,0 +1,16 @@
+# gpt-oss-20b, OpenAI's open-weight 21B mixture of experts with 3.6B active,
+# published natively in MXFP4: 12.8 GiB served from 3 safetensors shards. The
+# repository's original/ (the reference checkpoint) and metal/ (the Apple
+# Silicon build) hold 12.8 GiB each that no vLLM server reads; both stay out.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: gpt-oss-20b
+spec:
+  huggingFace:
+    repository: openai/gpt-oss-20b
+    revision: 6cee5e81ee83917806bbde320786a8fb61efebee
+  description: gpt-oss-20b (21B MoE, 3.6B active) in OpenAI's native MXFP4; 12.8 GiB, 3 safetensors shards, without the original/ and metal/ copies.
+  license: Apache-2.0
+  # The default list plus the two directories; exclude replaces the default.
+  exclude: [README.md, .gitattributes, "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.webp", "original/*", "metal/*"]

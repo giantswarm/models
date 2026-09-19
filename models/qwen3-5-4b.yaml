@@ -1,0 +1,12 @@
+# Qwen3.5-4B, the official BF16 checkpoint of the 4B dense model, unquantized:
+# 8.7 GiB on disk as 2 safetensors shards. The smallest entry of the line-up.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: qwen3-5-4b
+spec:
+  huggingFace:
+    repository: Qwen/Qwen3.5-4B
+    revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  description: Qwen3.5-4B (4B dense) as the official BF16 checkpoint; 8.7 GiB, 2 safetensors shards.
+  license: Apache-2.0

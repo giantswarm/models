@@ -1,0 +1,13 @@
+# Gemma 4 31B instruction-tuned, Red Hat AI's FP8 dynamic quantization in the
+# compressed-tensors format: 31.0 GiB on disk as 2 safetensors shards. Served
+# beside the default on a 48 GB card.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: gemma-4-31b-fp8
+spec:
+  huggingFace:
+    repository: RedHatAI/gemma-4-31B-it-FP8-dynamic
+    revision: d4ab4f579dd3516f97d8a6a4c98d0653480bad15
+  description: Gemma 4 31B instruction-tuned as Red Hat AI's FP8 dynamic quantization (compressed-tensors); 31.0 GiB, 2 safetensors shards.
+  license: Apache-2.0
