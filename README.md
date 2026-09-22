@@ -61,8 +61,8 @@ registry's chunked blob upload, two 256 MiB chunks in memory at a time, resuming
 on either side from the last byte. That is why `publish-models` runs on the ordinary Docker executor
 with the `architect` image.
 
-After a layer's last byte the registry finalizes the blob -- it hashes what it holds, which takes
-minutes for a large blob -- and its gateway may give up on the commit request before that (Azure
+After a layer's last byte the registry finalizes the blob — it hashes what it holds, which takes
+minutes for a large blob — and its gateway may give up on the commit request before that (Azure
 Container Registry answers 504 after eight minutes, which one 106 GB layer did not fit; hence the 8 GiB
 limit) while the registry keeps working. The tool names each layer's digest before its commit, polls
 for the blob by that digest after an unconfirmed commit, and sends the commit again only while the
