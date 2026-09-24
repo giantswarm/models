@@ -7,6 +7,9 @@ import (
 	"testing"
 )
 
+// validTag is the tag of the valid specification: its revision's first twelve characters.
+const validTag = "91c0fe31d692"
+
 const valid = `apiVersion: models.giantswarm.io/v1alpha1
 kind: ModelImage
 metadata:
@@ -33,7 +36,7 @@ func TestLoadValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := m.Tag(), "91c0fe31d692"; got != want {
+	if got, want := m.Tag(), validTag; got != want {
 		t.Errorf("Tag() = %q, want %q", got, want)
 	}
 	if m.Base() != DefaultBase {
@@ -54,7 +57,7 @@ func TestLoadValid(t *testing.T) {
 func TestLoadRejects(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]string{
-		"short revision": strings.Replace(valid, "91c0fe31d692dd8448d9bc06e8d1877345009e3b", "91c0fe31d692", 1),
+		"short revision": strings.Replace(valid, "91c0fe31d692dd8448d9bc06e8d1877345009e3b", validTag, 1),
 		"bad name":       strings.Replace(valid, "name: tiny-random-gpt2", "name: Tiny_GPT2", 1),
 		"bad repository": strings.Replace(valid, "hf-internal-testing/tiny-random-gpt2", "tiny-random-gpt2", 1),
 		"unknown field":  valid + "  weights: 12\n",
@@ -100,7 +103,7 @@ func TestTagOfAnImageWithExtraFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	tag := m.Tag()
-	if !strings.HasPrefix(tag, "91c0fe31d692-") || len(tag) != TagLength+1+ExtraTagLength || m.CheckpointTag() != "91c0fe31d692" {
+	if !strings.HasPrefix(tag, validTag+"-") || len(tag) != TagLength+1+ExtraTagLength || m.CheckpointTag() != validTag {
 		t.Fatalf("Tag() = %q, CheckpointTag() = %q", tag, m.CheckpointTag())
 	}
 	if d := m.ExtraFilesDigest(); !strings.HasPrefix(d, tag[TagLength+1:]) || len(d) != 64 {
@@ -129,7 +132,7 @@ func TestTagOfAnImageWithExtraFiles(t *testing.T) {
 	// Without extra files, the tag is the revision's.
 	plain := *m
 	plain.Spec.ExtraFiles = nil
-	if plain.Tag() != "91c0fe31d692" || plain.ExtraFilesDigest() != "" {
+	if plain.Tag() != validTag || plain.ExtraFilesDigest() != "" {
 		t.Errorf("without extra files: tag %q digest %q", plain.Tag(), plain.ExtraFilesDigest())
 	}
 }

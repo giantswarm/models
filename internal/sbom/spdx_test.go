@@ -46,7 +46,7 @@ func TestBuild(t *testing.T) {
 	if base.Name != "giantswarm/busybox" || base.VersionInfo != "1.38.0" || !strings.HasPrefix(base.ExternalRefs[0].ReferenceLocator, "pkg:oci/busybox@sha256:4444") || !strings.HasSuffix(base.ExternalRefs[0].ReferenceLocator, "&tag=1.38.0") {
 		t.Errorf("base package: %+v", base)
 	}
-	if len(doc.Relationships) != 5 || doc.Relationships[3].RelationshipType != "CONTAINS" {
+	if len(doc.Relationships) != 5 || doc.Relationships[3].RelationshipType != contains {
 		t.Errorf("relationships: %+v", doc.Relationships)
 	}
 }
@@ -75,19 +75,19 @@ func TestBuildListsAnExtraFileAsAPackageOfItsOwn(t *testing.T) {
 		len(extra.HasFiles) != 1 || extra.HasFiles[0] != doc.Files[1].SPDXID || doc.Files[1].Checksums[0].ChecksumValue != strings.Repeat("3", 64) {
 		t.Errorf("extra file package: %+v, file %+v", extra, doc.Files[1])
 	}
-	var describes, contains int
+	var described, contained int
 	for _, r := range doc.Relationships {
-		if r.SPDXElementID == "SPDXRef-DOCUMENT" && r.RelatedSPDXElement == extra.SPDXID && r.RelationshipType == "DESCRIBES" {
-			describes++
+		if r.SPDXElementID == docID && r.RelatedSPDXElement == extra.SPDXID && r.RelationshipType == describes {
+			described++
 		}
-		if r.SPDXElementID == extra.SPDXID && r.RelatedSPDXElement == doc.Files[1].SPDXID && r.RelationshipType == "CONTAINS" {
-			contains++
+		if r.SPDXElementID == extra.SPDXID && r.RelatedSPDXElement == doc.Files[1].SPDXID && r.RelationshipType == contains {
+			contained++
 		}
-		if r.SPDXElementID == "SPDXRef-Package-model" && r.RelatedSPDXElement == doc.Files[1].SPDXID {
+		if r.SPDXElementID == modelID && r.RelatedSPDXElement == doc.Files[1].SPDXID {
 			t.Errorf("the checkpoint must not contain the extra file: %+v", r)
 		}
 	}
-	if describes != 1 || contains != 1 {
+	if described != 1 || contained != 1 {
 		t.Errorf("relationships: %+v", doc.Relationships)
 	}
 }

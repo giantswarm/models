@@ -82,6 +82,11 @@ const (
 	baseID  = "SPDXRef-Package-base"
 	// noAssertion is SPDX for "not stated".
 	noAssertion = "NOASSERTION"
+
+	// The relationship types the document uses.
+	describes = "DESCRIBES"
+	contains  = "CONTAINS"
+	dependsOn = "DEPENDS_ON"
 )
 
 // Build describes the published image as an SPDX document.
@@ -102,9 +107,9 @@ func Build(m *spec.ModelImage, p *modelcar.Published, tool string, now time.Time
 			Creators: []string{"Tool: " + tool, "Organization: Giant Swarm"},
 		},
 		Relationships: []Relationship{
-			{docID, "DESCRIBES", modelID},
-			{docID, "DESCRIBES", baseID},
-			{modelID, "DEPENDS_ON", baseID},
+			{docID, describes, modelID},
+			{docID, describes, baseID},
+			{modelID, dependsOn, baseID},
 		},
 	}
 	model := Package{
@@ -135,7 +140,7 @@ func Build(m *spec.ModelImage, p *modelcar.Published, tool string, now time.Time
 		})
 		if f.URL == "" {
 			model.HasFiles = append(model.HasFiles, id)
-			doc.Relationships = append(doc.Relationships, Relationship{modelID, "CONTAINS", id})
+			doc.Relationships = append(doc.Relationships, Relationship{modelID, contains, id})
 			continue
 		}
 		// An extra file is not part of the checkpoint: a package of its own,
@@ -153,7 +158,7 @@ func Build(m *spec.ModelImage, p *modelcar.Published, tool string, now time.Time
 			PrimaryPackagePurpose: "FILE",
 			HasFiles:              []string{id},
 		})
-		doc.Relationships = append(doc.Relationships, Relationship{docID, "DESCRIBES", pkgID}, Relationship{pkgID, "CONTAINS", id})
+		doc.Relationships = append(doc.Relationships, Relationship{docID, describes, pkgID}, Relationship{pkgID, contains, id})
 	}
 	base := Package{
 		Name:                  baseName(p.Base),
