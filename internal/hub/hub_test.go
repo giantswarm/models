@@ -158,3 +158,22 @@ func TestOpenGivesUp(t *testing.T) {
 		t.Fatal("expected the stream to fail when the file cannot be completed")
 	}
 }
+
+func TestStatAndOpenAFileAtAURL(t *testing.T) {
+	h, c := newFakeHub(t, 1)
+	u := c.URL + "/" + h.repo + "/resolve/" + h.rev + "/" + weights
+	ctx := context.Background()
+	size, err := c.Stat(ctx, u)
+	if err != nil || size != int64(len(h.files[weights])) {
+		t.Fatalf("Stat() = %d, %v; want %d", size, err, len(h.files[weights]))
+	}
+	// The repository and revision are ignored for a file with a URL; a
+	// truncated response resumes as it does for a file of the Hub.
+	got, err := io.ReadAll(c.Open(ctx, "other/repo", "main", File{Path: "tiktoken/x", Size: size, URL: u}))
+	if err != nil || !bytes.Equal(got, h.files[weights]) {
+		t.Fatalf("Open(URL) = %d bytes, %v", len(got), err)
+	}
+	if _, err := c.Stat(ctx, c.URL+"/nowhere"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Errorf("Stat of a missing file: %v", err)
+	}
+}

@@ -1,5 +1,6 @@
 // Package sbom writes the SPDX document attested on a model image: the
-// checkpoint as a package with every file's hash, and the base image.
+// checkpoint as a package with every file's hash, each extra file as a package
+// of its own with its URL and hash, and the base image.
 package sbom
 
 import (
@@ -31,7 +32,7 @@ type CreationInfo struct {
 	Creators []string `json:"creators"`
 }
 
-// Package is the checkpoint or the base image.
+// Package is the checkpoint, an extra file or the base image.
 type Package struct {
 	Name                  string        `json:"name"`
 	SPDXID                string        `json:"SPDXID"`
@@ -81,6 +82,11 @@ const (
 	baseID  = "SPDXRef-Package-base"
 	// noAssertion is SPDX for "not stated".
 	noAssertion = "NOASSERTION"
+
+	// The relationship types the document uses.
+	describes = "DESCRIBES"
+	contains  = "CONTAINS"
+	dependsOn = "DEPENDS_ON"
 )
 
 // Build describes the published image as an SPDX document.
@@ -101,9 +107,9 @@ func Build(m *spec.ModelImage, p *modelcar.Published, tool string, now time.Time
 			Creators: []string{"Tool: " + tool, "Organization: Giant Swarm"},
 		},
 		Relationships: []Relationship{
-			{docID, "DESCRIBES", modelID},
-			{docID, "DESCRIBES", baseID},
-			{modelID, "DEPENDS_ON", baseID},
+			{docID, describes, modelID},
+			{docID, describes, baseID},
+			{modelID, dependsOn, baseID},
 		},
 	}
 	model := Package{
@@ -122,6 +128,7 @@ func Build(m *spec.ModelImage, p *modelcar.Published, tool string, now time.Time
 			ReferenceLocator:  fmt.Sprintf("pkg:huggingface/%s@%s", hf.Repository, hf.Revision),
 		}},
 	}
+	var extras []Package
 	for i, f := range p.Files {
 		id := fmt.Sprintf("SPDXRef-File-%d", i+1)
 		doc.Files = append(doc.Files, File{
@@ -131,8 +138,27 @@ func Build(m *spec.ModelImage, p *modelcar.Published, tool string, now time.Time
 			LicenseConcluded: noAssertion,
 			CopyrightText:    noAssertion,
 		})
-		model.HasFiles = append(model.HasFiles, id)
-		doc.Relationships = append(doc.Relationships, Relationship{modelID, "CONTAINS", id})
+		if f.URL == "" {
+			model.HasFiles = append(model.HasFiles, id)
+			doc.Relationships = append(doc.Relationships, Relationship{modelID, contains, id})
+			continue
+		}
+		// An extra file is not part of the checkpoint: a package of its own,
+		// downloaded from its URL.
+		pkgID := fmt.Sprintf("SPDXRef-Package-extra-%d", len(extras)+1)
+		extras = append(extras, Package{
+			Name:                  strings.TrimPrefix(f.Path, spec.MountPath+"/"),
+			SPDXID:                pkgID,
+			VersionInfo:           "sha256:" + f.SHA256,
+			DownloadLocation:      f.URL,
+			FilesAnalyzed:         true,
+			LicenseConcluded:      noAssertion,
+			LicenseDeclared:       noAssertion,
+			CopyrightText:         noAssertion,
+			PrimaryPackagePurpose: "FILE",
+			HasFiles:              []string{id},
+		})
+		doc.Relationships = append(doc.Relationships, Relationship{docID, describes, pkgID}, Relationship{pkgID, contains, id})
 	}
 	base := Package{
 		Name:                  baseName(p.Base),
@@ -148,7 +174,7 @@ func Build(m *spec.ModelImage, p *modelcar.Published, tool string, now time.Time
 	if purl := basePURL(p.Base); purl != "" {
 		base.ExternalRefs = []ExternalRef{{ReferenceCategory: "PACKAGE-MANAGER", ReferenceType: "purl", ReferenceLocator: purl}}
 	}
-	doc.Packages = []Package{model, base}
+	doc.Packages = append([]Package{model, base}, extras...)
 	return doc
 }
 

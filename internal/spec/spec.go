@@ -4,7 +4,10 @@
 package spec
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -29,6 +32,10 @@ const (
 	// TagLength is how many characters of the revision make the image tag.
 	TagLength = 12
 
+	// ExtraTagLength is how many characters of ExtraFilesDigest follow the
+	// revision in the tag of an image with extra files.
+	ExtraTagLength = 8
+
 	// MountPath is where the weights live in the image (KServe's modelcar
 	// contract: the runtime reads them at /mnt/models -> /proc/<pid>/root/models).
 	MountPath = "models"
@@ -42,6 +49,7 @@ var (
 	nameRE       = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	repositoryRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	revisionRE   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	sha256RE     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ModelImage is one specification file.
@@ -75,6 +83,21 @@ type Spec struct {
 	// Exclude replaces DefaultExclude: glob patterns matched against each
 	// repository file's path and base name.
 	Exclude []string `json:"exclude,omitempty"`
+	// ExtraFiles go into the image beside the checkpoint's files, in a layer
+	// of their own: files a runtime needs at serving time that the
+	// checkpoint's repository does not carry.
+	ExtraFiles []ExtraFile `json:"extraFiles,omitempty"`
+}
+
+// ExtraFile is one file fetched from a pinned URL.
+type ExtraFile struct {
+	// URL is where the file is fetched from, over HTTPS.
+	URL string `json:"url"`
+	// SHA256 is the hash of the file's bytes; a build that reads other bytes fails.
+	SHA256 string `json:"sha256"`
+	// Path is the file's destination relative to /models, e.g.
+	// tiktoken/o200k_base.tiktoken.
+	Path string `json:"path"`
 }
 
 // HuggingFace is a checkpoint: a repository on the Hub and the commit to package.
@@ -155,15 +178,76 @@ func (m *ModelImage) Validate() error {
 			problems = append(problems, fmt.Sprintf("spec.exclude %q: %v", pattern, err))
 		}
 	}
+	problems = append(problems, m.validateExtraFiles()...)
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid specification:\n  %s", strings.Join(problems, "\n  "))
 	}
 	return nil
 }
 
-// Tag is the image tag: the first TagLength characters of the revision.
+func (m *ModelImage) validateExtraFiles() []string {
+	var problems []string
+	paths := map[string]bool{}
+	for i, f := range m.Spec.ExtraFiles {
+		field := fmt.Sprintf("spec.extraFiles[%d]", i)
+		if u, err := url.Parse(f.URL); err != nil || u.Scheme != "https" || u.Host == "" {
+			problems = append(problems, fmt.Sprintf("%s.url %q must be an https:// URL", field, f.URL))
+		}
+		if !sha256RE.MatchString(f.SHA256) {
+			problems = append(problems, fmt.Sprintf("%s.sha256 %q must be 64 lower-case hex digits", field, f.SHA256))
+		}
+		if f.Path == "" || f.Path == "." || path.IsAbs(f.Path) || path.Clean(f.Path) != f.Path || f.Path == ".." || strings.HasPrefix(f.Path, "../") {
+			problems = append(problems, fmt.Sprintf("%s.path %q must be a clean relative path under /%s", field, f.Path, MountPath))
+			continue
+		}
+		if paths[f.Path] {
+			problems = append(problems, fmt.Sprintf("%s.path %q is listed twice", field, f.Path))
+		}
+		paths[f.Path] = true
+	}
+	for p := range paths {
+		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+			if paths[dir] {
+				problems = append(problems, fmt.Sprintf("spec.extraFiles: %q is a file, %q needs it to be a directory", dir, p))
+			}
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// Tag is the image tag: the first TagLength characters of the revision, and
+// for an image with extra files a dash and the first ExtraTagLength
+// characters of ExtraFilesDigest, so adding, changing or removing an extra
+// file publishes under a new tag and no tag ever changes its content.
 func (m *ModelImage) Tag() string {
+	tag := m.CheckpointTag()
+	if d := m.ExtraFilesDigest(); d != "" {
+		tag += "-" + d[:ExtraTagLength]
+	}
+	return tag
+}
+
+// CheckpointTag is the tag of the checkpoint's image without extra files.
+func (m *ModelImage) CheckpointTag() string {
 	return m.Spec.HuggingFace.Revision[:TagLength]
+}
+
+// ExtraFilesDigest identifies the extra files by content and place: the hex
+// sha256 of one "<path> <sha256>\n" line per file, in path order. The URLs
+// do not count; the same bytes fetched from a mirror are the same image.
+// Empty when the specification has no extra files.
+func (m *ModelImage) ExtraFilesDigest() string {
+	if len(m.Spec.ExtraFiles) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(m.Spec.ExtraFiles))
+	for _, f := range m.Spec.ExtraFiles {
+		lines = append(lines, f.Path+" "+f.SHA256+"\n")
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "")))
+	return hex.EncodeToString(sum[:])
 }
 
 // Base is the base image reference.

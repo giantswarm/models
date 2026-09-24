@@ -11,7 +11,20 @@ spec:
   huggingFace:
     repository: openai/gpt-oss-120b
     revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
-  description: gpt-oss-120b (117B MoE, 5.1B active) in OpenAI's native MXFP4; 60.8 GiB, 15 safetensors shards, without the original/ and metal/ copies.
+  description: gpt-oss-120b (117B MoE, 5.1B active) in OpenAI's native MXFP4; 60.8 GiB, 15 safetensors shards, without the original/ and metal/ copies, with the harmony tiktoken encodings.
   license: Apache-2.0
   # The default list plus the two directories; exclude replaces the default.
   exclude: [README.md, .gitattributes, "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.webp", "original/*", "metal/*"]
+  # The harmony renderer vLLM uses for gpt-oss loads the o200k_base encoding at
+  # the first request, from openaipublic.blob.core.windows.net unless
+  # TIKTOKEN_ENCODINGS_BASE names a directory holding the file (and
+  # cl100k_base beside it). With the encodings in the image, a runtime without
+  # internet access sets TIKTOKEN_ENCODINGS_BASE=/mnt/models/tiktoken. The
+  # hashes are the ones openai_harmony checks the files against.
+  extraFiles:
+    - url: https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken
+      sha256: 446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d
+      path: tiktoken/o200k_base.tiktoken
+    - url: https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
+      sha256: 223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7
+      path: tiktoken/cl100k_base.tiktoken

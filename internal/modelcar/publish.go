@@ -33,6 +33,9 @@ const (
 	AnnotationWeights    = "io.giantswarm.models.weights.bytes"
 	AnnotationLayers     = "io.giantswarm.models.weights.layers"
 	AnnotationBase       = "io.giantswarm.models.base"
+	// AnnotationExtraFiles is the specification's ExtraFilesDigest; absent on
+	// an image without extra files.
+	AnnotationExtraFiles = "io.giantswarm.models.extra-files"
 )
 
 // DefaultMaxLayerSize bounds one weights layer. A registry finalizes a blob in
@@ -93,11 +96,15 @@ type Published struct {
 	// Existed reports that the tag already held this checkpoint and nothing was
 	// built or pushed.
 	Existed bool
+	// Annotations are the index annotations.
+	Annotations map[string]string
 }
 
 // Publish builds the image for a specification and pushes it, or finds it
 // already there. The weights never touch local disk: each file streams from
-// the Hub through the tar writer into the registry's blob upload.
+// the Hub (an extra file from its URL) through the tar writer into the
+// registry's blob upload. An image with extra files streams the checkpoint
+// only when the checkpoint's own image does not hold the same layers.
 func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, error) {
 	if o.Log == nil {
 		o.Log = func(string, ...any) {}
@@ -126,20 +133,11 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 	if err != nil {
 		return nil, err
 	}
-	all, err := o.Hub.Tree(ctx, m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision)
+	checkpoint, extra, err := Contents(ctx, m, o.Hub)
 	if err != nil {
 		return nil, err
 	}
-	var files []hub.File
-	var total int64
-	for _, f := range all {
-		if m.Excluded(f.Path) {
-			continue
-		}
-		files = append(files, f)
-		total += f.Size
-	}
-	if len(files) == 0 {
+	if len(checkpoint) == 0 {
 		return nil, fmt.Errorf("%s: every file of the checkpoint is excluded", m.Path)
 	}
 
@@ -148,14 +146,42 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 		return nil, err
 	}
 
-	o.Log("building %s from %s@%s: %d files, %s, base %s", tag, m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision, len(files), humanBytes(total), baseRef)
-	layers, digests, err := streamLayers(ctx, m, files, rev.LastModified, total, repo, o)
+	var extraNote string
+	if len(extra) > 0 {
+		extraNote = fmt.Sprintf(" and %d extra files, %s", len(extra), humanBytes(totalSize(extra)))
+	}
+	o.Log("building %s from %s@%s: %d files, %s%s, base %s", tag, m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision,
+		len(checkpoint), humanBytes(totalSize(checkpoint)), extraNote, baseRef)
+	groups := groupFiles(checkpoint, o.MaxLayerSize)
+	layers, err := publishedCheckpoint(m, repo, checkpoint, groups, rev.LastModified, remoteOpts, o.Log)
 	if err != nil {
 		return nil, err
 	}
+	var digests []FileDigest
+	var stream [][]hub.File
+	if layers == nil {
+		stream = groups
+	} else if digests, err = checkpointDigests(ctx, m, o.Hub, checkpoint); err != nil {
+		return nil, err
+	}
+	stream = append(stream, groupFiles(extra, o.MaxLayerSize)...)
+	streamed, streamedDigests, err := streamLayers(ctx, m, stream, rev.LastModified, repo, o)
+	if err != nil {
+		return nil, err
+	}
+	layers = append(layers, streamed...)
+	digests = append(digests, streamedDigests...)
 	var weights int64
 	for _, l := range layers {
 		weights += l.Size
+	}
+	comments := make([]string, len(layers))
+	for i := range layers {
+		what := fmt.Sprintf("%s@%s", m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision)
+		if i >= len(groups) {
+			what = "the specification's extra files"
+		}
+		comments[i] = fmt.Sprintf("%s under /%s, layer %d of %d", what, spec.MountPath, i+1, len(layers))
 	}
 
 	labels := map[string]string{
@@ -168,10 +194,11 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 		"org.opencontainers.image.licenses":    m.Spec.License,
 		AnnotationRepository:                   m.Spec.HuggingFace.Repository,
 		AnnotationRevision:                     m.Spec.HuggingFace.Revision,
-		AnnotationFiles:                        fmt.Sprint(len(files)),
+		AnnotationFiles:                        fmt.Sprint(len(checkpoint) + len(extra)),
 		AnnotationWeights:                      fmt.Sprint(weights),
 		AnnotationLayers:                       fmt.Sprint(len(layers)),
 		AnnotationBase:                         baseRef,
+		AnnotationExtraFiles:                   m.ExtraFilesDigest(),
 	}
 	for k, v := range labels {
 		if v == "" {
@@ -182,7 +209,7 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 	idx := mutate.IndexMediaType(empty.Index, types.OCIImageIndex)
 	manifests := map[string]v1.Hash{}
 	for _, b := range bases {
-		img, err := appendWeights(b.image, layers, labels, rev.LastModified, o.Tool, m)
+		img, err := appendWeights(b.image, layers, comments, labels, rev.LastModified, o.Tool, m)
 		if err != nil {
 			return nil, err
 		}
@@ -204,8 +231,53 @@ func Publish(ctx context.Context, m *spec.ModelImage, o Options) (*Published, er
 	o.Log("pushed %s@%s (%d platforms)", tag, indexDigest, len(manifests))
 	return &Published{
 		Reference: tag, Digest: indexDigest, Manifests: manifests, Layers: layers, Files: digests,
-		Base: baseRef, Created: rev.LastModified,
+		Base: baseRef, Created: rev.LastModified, Annotations: labels,
 	}, nil
+}
+
+func totalSize(files []hub.File) int64 {
+	var n int64
+	for _, f := range files {
+		n += f.Size
+	}
+	return n
+}
+
+// publishedCheckpoint returns the checkpoint's layers as the image under the
+// checkpoint's own tag holds them, for an image with extra files: that image
+// is the same checkpoint, and when it holds the same files cut into layers of
+// the same sizes as this build's, its layer blobs are the ones this build would
+// stream, already in the repository. The image with extra files then adds its
+// extra layers to them and streams nothing of the checkpoint again. Nil when
+// the specification has no extra files, there is no such image, or its layers
+// differ from this build's.
+func publishedCheckpoint(m *spec.ModelImage, repo name.Repository, checkpoint []hub.File, groups [][]hub.File, modTime time.Time, opts []remote.Option, log func(string, ...any)) ([]v1.Descriptor, error) {
+	if len(m.Spec.ExtraFiles) == 0 {
+		return nil, nil
+	}
+	plain := *m
+	plain.Spec.ExtraFiles = nil
+	tag := repo.Tag(plain.Tag())
+	p, err := existing(&plain, tag, opts)
+	if err != nil || p == nil {
+		return nil, err
+	}
+	if files := p.Annotations[AnnotationFiles]; files != fmt.Sprint(len(checkpoint)) || len(p.Layers) != len(groups) {
+		log("%s holds %s files in %d layers, this build cuts %d files into %d; the checkpoint is streamed", tag, files, len(p.Layers), len(checkpoint), len(groups))
+		return nil, nil
+	}
+	for i, g := range groups {
+		size, err := (&Layer{Files: g, ModTime: modTime, Root: spec.MountPath}).Size()
+		if err != nil {
+			return nil, err
+		}
+		if l := p.Layers[i]; l.MediaType != types.OCIUncompressedLayer || l.Size != size {
+			log("%s layer %d is %s of %d bytes, this build's is %d; the checkpoint is streamed", tag, i+1, l.MediaType, l.Size, size)
+			return nil, nil
+		}
+	}
+	log("%s holds this checkpoint in the same %d layers; they are reused, not streamed", tag, len(groups))
+	return p.Layers, nil
 }
 
 // insecureIf carries a plain-HTTP registry (tests) into derived references.
@@ -240,7 +312,10 @@ func existing(m *spec.ModelImage, tag name.Tag, opts []remote.Option) (*Publishe
 		return nil, fmt.Errorf("%s exists but holds %s@%s, not %s@%s: a tag is never re-pushed with other content",
 			tag, im.Annotations[AnnotationRepository], im.Annotations[AnnotationRevision], m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision)
 	}
-	p := &Published{Reference: tag, Digest: desc.Digest, Manifests: map[string]v1.Hash{}, Base: im.Annotations[AnnotationBase], Existed: true}
+	if got, want := im.Annotations[AnnotationExtraFiles], m.ExtraFilesDigest(); got != want {
+		return nil, fmt.Errorf("%s exists but holds the extra files %q, not %q: a tag is never re-pushed with other content", tag, got, want)
+	}
+	p := &Published{Reference: tag, Digest: desc.Digest, Manifests: map[string]v1.Hash{}, Base: im.Annotations[AnnotationBase], Existed: true, Annotations: im.Annotations}
 	if created, err := time.Parse(time.RFC3339, im.Annotations["org.opencontainers.image.created"]); err == nil {
 		p.Created = created
 	}
@@ -317,20 +392,27 @@ func baseImages(ctx context.Context, ref string, opts []remote.Option) ([]base, 
 	return bases, pinned, nil
 }
 
-// streamLayers streams the checkpoint into the registry as uncompressed tar
-// blobs of at most o.MaxLayerSize each, one after the other, and returns
-// their descriptors and the per-file hashes.
-func streamLayers(ctx context.Context, m *spec.ModelImage, files []hub.File, modTime time.Time, total int64, repo name.Repository, o Options) ([]v1.Descriptor, []FileDigest, error) {
+// streamLayers streams groups of files into the registry as uncompressed tar
+// blobs, one after the other, and returns their descriptors and the per-file
+// hashes. A file carries its source: the checkpoint at the revision, or an
+// extra file's URL.
+func streamLayers(ctx context.Context, m *spec.ModelImage, groups [][]hub.File, modTime time.Time, repo name.Repository, o Options) ([]v1.Descriptor, []FileDigest, error) {
+	if len(groups) == 0 {
+		return nil, nil, nil
+	}
 	rt, err := transport.NewWithContext(ctx, repo.Registry, o.Auth, o.Transport, []string{repo.Scope(transport.PushScope)})
 	if err != nil {
 		return nil, nil, err
+	}
+	var total int64
+	for _, g := range groups {
+		total += totalSize(g)
 	}
 	prog := &progress{total: total, started: time.Now(), log: o.Log}
 	progCtx, stopProgress := context.WithCancel(ctx)
 	defer stopProgress()
 	go prog.run(progCtx, o.ProgressInterval)
 
-	groups := groupFiles(files, o.MaxLayerSize)
 	var digests []FileDigest
 	var layers []v1.Descriptor
 	var done int64
@@ -352,11 +434,11 @@ func streamLayers(ctx context.Context, m *spec.ModelImage, files []hub.File, mod
 		res, err := up.Upload(ctx, pr)
 		if err != nil {
 			_ = pr.CloseWithError(err)
-			return nil, nil, fmt.Errorf("streaming weights layer %d of %d: %w", i+1, len(groups), err)
+			return nil, nil, fmt.Errorf("streaming layer %d of %d: %w", i+1, len(groups), err)
 		}
 		done += res.Size
 		layers = append(layers, v1.Descriptor{MediaType: types.OCIUncompressedLayer, Digest: res.Digest, Size: res.Size})
-		o.Log("weights layer %d of %d, %s (%s, %d files), is in the registry", i+1, len(groups), res.Digest, humanBytes(res.Size), len(group))
+		o.Log("layer %d of %d streamed, %s (%s, %d files), is in the registry", i+1, len(groups), res.Digest, humanBytes(res.Size), len(group))
 	}
 	stopProgress()
 	prog.report()
@@ -389,9 +471,9 @@ func groupFiles(files []hub.File, limit int64) [][]hub.File {
 	return groups
 }
 
-// appendWeights adds the (already uploaded) weights layers to a base image and
-// records the checkpoint in the config.
-func appendWeights(b v1.Image, layers []v1.Descriptor, labels map[string]string, created time.Time, tool string, m *spec.ModelImage) (v1.Image, error) {
+// appendWeights adds the (already uploaded) weights layers, each with its
+// history comment, to a base image and records the checkpoint in the config.
+func appendWeights(b v1.Image, layers []v1.Descriptor, comments []string, labels map[string]string, created time.Time, tool string, m *spec.ModelImage) (v1.Image, error) {
 	var adds []mutate.Addendum
 	for i, layer := range layers {
 		adds = append(adds, mutate.Addendum{
@@ -399,7 +481,7 @@ func appendWeights(b v1.Image, layers []v1.Descriptor, labels map[string]string,
 			History: v1.History{
 				Created:   v1.Time{Time: created},
 				CreatedBy: fmt.Sprintf("%s publish %s", tool, m.Metadata.Name),
-				Comment:   fmt.Sprintf("%s@%s under /%s, layer %d of %d", m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision, spec.MountPath, i+1, len(layers)),
+				Comment:   comments[i],
 			},
 		})
 	}

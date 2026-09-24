@@ -58,8 +58,9 @@ func validateCommand() *cobra.Command {
 		Use:   "validate [dir]",
 		Short: "Check every specification and resolve its checkpoint on the Hub",
 		Long: `validate reads every specification under the directory (models/ by default),
-checks its fields, and asks the Hub for the revision's file list. It prints
-what an image built from each specification would hold.`,
+checks its fields, asks the Hub for the revision's file list, and fetches every
+extra file to check its bytes against the pinned sha256. It prints what an
+image built from each specification would hold.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := "models"
@@ -96,19 +97,20 @@ func resolve(ctx context.Context, client *hub.Client, m *spec.ModelImage) (int, 
 	if _, err := client.Revision(ctx, m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision); err != nil {
 		return 0, 0, err
 	}
-	tree, err := client.Tree(ctx, m.Spec.HuggingFace.Repository, m.Spec.HuggingFace.Revision)
+	checkpoint, extra, err := modelcar.Contents(ctx, m, client)
 	if err != nil {
 		return 0, 0, err
 	}
-	var n int
+	if err := modelcar.VerifyExtraFiles(ctx, client, m, extra); err != nil {
+		return 0, 0, err
+	}
 	var size int64
-	for _, f := range tree {
-		if !m.Excluded(f.Path) {
-			n++
+	for _, files := range [][]hub.File{checkpoint, extra} {
+		for _, f := range files {
 			size += f.Size
 		}
 	}
-	return n, size, nil
+	return len(checkpoint) + len(extra), size, nil
 }
 
 func gib(n int64) string {

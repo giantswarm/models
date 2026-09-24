@@ -46,7 +46,48 @@ func TestBuild(t *testing.T) {
 	if base.Name != "giantswarm/busybox" || base.VersionInfo != "1.38.0" || !strings.HasPrefix(base.ExternalRefs[0].ReferenceLocator, "pkg:oci/busybox@sha256:4444") || !strings.HasSuffix(base.ExternalRefs[0].ReferenceLocator, "&tag=1.38.0") {
 		t.Errorf("base package: %+v", base)
 	}
-	if len(doc.Relationships) != 5 || doc.Relationships[3].RelationshipType != "CONTAINS" {
+	if len(doc.Relationships) != 5 || doc.Relationships[3].RelationshipType != contains {
+		t.Errorf("relationships: %+v", doc.Relationships)
+	}
+}
+
+func TestBuildListsAnExtraFileAsAPackageOfItsOwn(t *testing.T) {
+	m := &spec.ModelImage{Metadata: spec.Metadata{Name: "tiny"}, Spec: spec.Spec{
+		HuggingFace: spec.HuggingFace{Repository: "acme/tiny", Revision: strings.Repeat("a", 40)},
+	}}
+	tag, _ := name.NewTag("gsoci.azurecr.io/giantswarm/models/tiny:aaaaaaaaaaaa-12345678")
+	url := "https://example.com/encodings/o200k_base.tiktoken"
+	p := &modelcar.Published{
+		Reference: tag,
+		Digest:    v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("1", 64)},
+		Files: []modelcar.FileDigest{
+			{Path: "models/config.json", Size: 3, SHA256: strings.Repeat("2", 64)},
+			{Path: "models/tiktoken/o200k_base.tiktoken", Size: 30, SHA256: strings.Repeat("3", 64), URL: url},
+		},
+		Base: "gsoci.azurecr.io/giantswarm/busybox:1.38.0@sha256:" + strings.Repeat("4", 64),
+	}
+	doc := Build(m, p, "models v1", time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC))
+	if len(doc.Files) != 2 || len(doc.Packages) != 3 || len(doc.Packages[0].HasFiles) != 1 {
+		t.Fatalf("document: %+v", doc)
+	}
+	extra := doc.Packages[2]
+	if extra.Name != "tiktoken/o200k_base.tiktoken" || extra.DownloadLocation != url || extra.VersionInfo != "sha256:"+strings.Repeat("3", 64) ||
+		len(extra.HasFiles) != 1 || extra.HasFiles[0] != doc.Files[1].SPDXID || doc.Files[1].Checksums[0].ChecksumValue != strings.Repeat("3", 64) {
+		t.Errorf("extra file package: %+v, file %+v", extra, doc.Files[1])
+	}
+	var described, contained int
+	for _, r := range doc.Relationships {
+		if r.SPDXElementID == docID && r.RelatedSPDXElement == extra.SPDXID && r.RelationshipType == describes {
+			described++
+		}
+		if r.SPDXElementID == extra.SPDXID && r.RelatedSPDXElement == doc.Files[1].SPDXID && r.RelationshipType == contains {
+			contained++
+		}
+		if r.SPDXElementID == modelID && r.RelatedSPDXElement == doc.Files[1].SPDXID {
+			t.Errorf("the checkpoint must not contain the extra file: %+v", r)
+		}
+	}
+	if described != 1 || contained != 1 {
 		t.Errorf("relationships: %+v", doc.Relationships)
 	}
 }
