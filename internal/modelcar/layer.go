@@ -1,8 +1,9 @@
 // Package modelcar builds and publishes a model image: a base image with a
 // shell plus uncompressed tar layers holding a Hugging Face checkpoint under
 // /models -- as few layers as DefaultMaxLayerSize allows, files whole, in path
-// order -- as a two-platform index that both an amd64 and an arm64 node
-// resolve to the same weights blobs.
+// order -- and the specification's extra files in a layer of their own after
+// them, as a two-platform index that both an amd64 and an arm64 node resolve
+// to the same weights blobs.
 package modelcar
 
 import (
@@ -26,6 +27,8 @@ type FileDigest struct {
 	Path   string
 	Size   int64
 	SHA256 string
+	// URL is where an extra file was fetched from; empty for the checkpoint's files.
+	URL string
 }
 
 // Source opens repository files.
@@ -33,7 +36,8 @@ type Source interface {
 	Open(ctx context.Context, repository, revision string, f hub.File) io.ReadCloser
 }
 
-// Layer describes the weights layer to stream.
+// Layer describes one layer to stream: checkpoint files, read from the
+// repository at the revision, or extra files, each read from its URL.
 type Layer struct {
 	Repository string
 	Revision   string
@@ -52,10 +56,36 @@ type Layer struct {
 
 // WriteTo streams the layer as an uncompressed tar: the root directory, then
 // the files in path order with their parent directories, every entry owned by
-// root with mode 0644 (0755 for directories) and the commit's timestamp. An
-// LFS file whose bytes hash to something other than the Hub's record fails
-// the stream.
+// root with mode 0644 (0755 for directories) and the commit's timestamp. A
+// file whose bytes hash to something other than the Hub's record (or, for an
+// extra file, the specification's pin) fails the stream.
 func (l *Layer) WriteTo(ctx context.Context, w io.Writer, src Source) error {
+	return l.write(w, func(w io.Writer, f hub.File, name string) error {
+		return l.copyFile(ctx, w, src, f, name)
+	})
+}
+
+// Size is the byte count WriteTo produces, computed without reading a file:
+// the headers are the same, and the tar writer passes a file's content through
+// unchanged. Equal sizes of the same file list at the same revision mean
+// equal layers, which is how a build recognises layers already published.
+func (l *Layer) Size() (int64, error) {
+	cw := &countingWriter{}
+	zeros := make([]byte, 1<<20)
+	err := l.write(cw, func(w io.Writer, f hub.File, _ string) error {
+		for left := f.Size; left > 0; {
+			n := min(left, int64(len(zeros)))
+			if _, err := w.Write(zeros[:n]); err != nil {
+				return err
+			}
+			left -= n
+		}
+		return nil
+	})
+	return cw.n, err
+}
+
+func (l *Layer) write(w io.Writer, content func(io.Writer, hub.File, string) error) error {
 	files := append([]hub.File(nil), l.Files...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
@@ -88,7 +118,7 @@ func (l *Layer) WriteTo(ctx context.Context, w io.Writer, src Source) error {
 		}); err != nil {
 			return err
 		}
-		if err := l.copyFile(ctx, tw, src, f, name); err != nil {
+		if err := content(tw, f, name); err != nil {
 			return err
 		}
 	}
@@ -108,14 +138,18 @@ func (l *Layer) copyFile(ctx context.Context, w io.Writer, src Source, f hub.Fil
 		return fmt.Errorf("%s: %w", f.Path, err)
 	}
 	if n != f.Size {
-		return fmt.Errorf("%s: wrote %d bytes, the tree lists %d", f.Path, n, f.Size)
+		return fmt.Errorf("%s: wrote %d bytes, %d listed", f.Path, n, f.Size)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	if f.SHA256 != "" && !strings.EqualFold(sum, f.SHA256) {
-		return fmt.Errorf("%s: the bytes hash to sha256:%s, the Hub records sha256:%s", f.Path, sum, f.SHA256)
+		pin := "the Hub records"
+		if f.URL != "" {
+			pin = "the specification pins"
+		}
+		return fmt.Errorf("%s: the bytes hash to sha256:%s, %s sha256:%s", f.Path, sum, pin, f.SHA256)
 	}
 	if l.Written != nil {
-		l.Written(FileDigest{Path: name, Size: n, SHA256: sum})
+		l.Written(FileDigest{Path: name, Size: n, SHA256: sum, URL: f.URL})
 	}
 	return nil
 }
@@ -144,4 +178,11 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		c.count(n)
 	}
 	return n, err
+}
+
+type countingWriter struct{ n int64 }
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	return len(p), nil
 }

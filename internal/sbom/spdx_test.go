@@ -50,3 +50,44 @@ func TestBuild(t *testing.T) {
 		t.Errorf("relationships: %+v", doc.Relationships)
 	}
 }
+
+func TestBuildListsAnExtraFileAsAPackageOfItsOwn(t *testing.T) {
+	m := &spec.ModelImage{Metadata: spec.Metadata{Name: "tiny"}, Spec: spec.Spec{
+		HuggingFace: spec.HuggingFace{Repository: "acme/tiny", Revision: strings.Repeat("a", 40)},
+	}}
+	tag, _ := name.NewTag("gsoci.azurecr.io/giantswarm/models/tiny:aaaaaaaaaaaa-12345678")
+	url := "https://example.com/encodings/o200k_base.tiktoken"
+	p := &modelcar.Published{
+		Reference: tag,
+		Digest:    v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("1", 64)},
+		Files: []modelcar.FileDigest{
+			{Path: "models/config.json", Size: 3, SHA256: strings.Repeat("2", 64)},
+			{Path: "models/tiktoken/o200k_base.tiktoken", Size: 30, SHA256: strings.Repeat("3", 64), URL: url},
+		},
+		Base: "gsoci.azurecr.io/giantswarm/busybox:1.38.0@sha256:" + strings.Repeat("4", 64),
+	}
+	doc := Build(m, p, "models v1", time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC))
+	if len(doc.Files) != 2 || len(doc.Packages) != 3 || len(doc.Packages[0].HasFiles) != 1 {
+		t.Fatalf("document: %+v", doc)
+	}
+	extra := doc.Packages[2]
+	if extra.Name != "tiktoken/o200k_base.tiktoken" || extra.DownloadLocation != url || extra.VersionInfo != "sha256:"+strings.Repeat("3", 64) ||
+		len(extra.HasFiles) != 1 || extra.HasFiles[0] != doc.Files[1].SPDXID || doc.Files[1].Checksums[0].ChecksumValue != strings.Repeat("3", 64) {
+		t.Errorf("extra file package: %+v, file %+v", extra, doc.Files[1])
+	}
+	var describes, contains int
+	for _, r := range doc.Relationships {
+		if r.SPDXElementID == "SPDXRef-DOCUMENT" && r.RelatedSPDXElement == extra.SPDXID && r.RelationshipType == "DESCRIBES" {
+			describes++
+		}
+		if r.SPDXElementID == extra.SPDXID && r.RelatedSPDXElement == doc.Files[1].SPDXID && r.RelationshipType == "CONTAINS" {
+			contains++
+		}
+		if r.SPDXElementID == "SPDXRef-Package-model" && r.RelatedSPDXElement == doc.Files[1].SPDXID {
+			t.Errorf("the checkpoint must not contain the extra file: %+v", r)
+		}
+	}
+	if describes != 1 || contains != 1 {
+		t.Errorf("relationships: %+v", doc.Relationships)
+	}
+}

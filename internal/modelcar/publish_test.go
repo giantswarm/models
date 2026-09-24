@@ -164,7 +164,7 @@ func TestPublishBuildsATwoPlatformIndexWithUncompressedLayers(t *testing.T) {
 	if p.Existed {
 		t.Fatal("first publication must build")
 	}
-	if p.Reference.TagStr() != "7c4f1bc1a2d6" {
+	if p.Reference.TagStr() != "7c4f1bc1a2d6" || p.Annotations[AnnotationExtraFiles] != "" {
 		t.Errorf("tag = %s", p.Reference.TagStr())
 	}
 	if len(p.Files) != 3 {
@@ -406,6 +406,229 @@ func TestHumanBytes(t *testing.T) {
 	for n, want := range map[int64]string{512: "512 B", 1536: "1.5 KiB", 105895996845: "98.6 GiB"} {
 		if got := humanBytes(n); got != want {
 			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// withExtraFiles serves two extra files over TLS, adds them to the
+// specification under tiktoken/ and points the Hub client's HTTP at a client
+// that trusts the server (and still reaches the plain-HTTP fake Hub).
+func withExtraFiles(t *testing.T, m *spec.ModelImage, o *Options) map[string][]byte {
+	t.Helper()
+	content := map[string][]byte{"o200k_base.tiktoken": []byte("bzIwMGs= 0\n"), "cl100k_base.tiktoken": []byte("Y2wxMDBr 0\nIQ== 1\n")}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/encodings/")
+		c, ok := content[name]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(c))
+	}))
+	t.Cleanup(srv.Close)
+	o.Hub.HTTP = srv.Client()
+	for _, name := range []string{"o200k_base.tiktoken", "cl100k_base.tiktoken"} {
+		sum := sha256.Sum256(content[name])
+		m.Spec.ExtraFiles = append(m.Spec.ExtraFiles, spec.ExtraFile{
+			URL: srv.URL + "/encodings/" + name, SHA256: hex.EncodeToString(sum[:]), Path: "tiktoken/" + name,
+		})
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+func TestPublishAddsTheExtraFilesInALayerOfTheirOwn(t *testing.T) {
+	m, o, h := setup(t)
+	ctx := context.Background()
+	plain, err := Publish(ctx, &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := withExtraFiles(t, &m, &o)
+	var logs []string
+	o.Log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)); t.Logf(f, a...) }
+
+	p, err := Publish(ctx, &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Existed || p.Reference.TagStr() != m.Tag() || !strings.HasPrefix(p.Reference.TagStr(), "7c4f1bc1a2d6-") {
+		t.Fatalf("published %s (existed %v), want the new tag %s", p.Reference, p.Existed, m.Tag())
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "they are reused, not streamed") {
+		t.Errorf("the checkpoint's layer must be reused from %s: %v", plain.Reference, logs)
+	}
+	if len(p.Layers) != 2 || p.Layers[0].Digest != plain.Layers[0].Digest || p.Layers[0].Size != plain.Layers[0].Size {
+		t.Fatalf("layers = %v, want the checkpoint's %v plus one", p.Layers, plain.Layers)
+	}
+	if len(p.Files) != 5 || p.Files[3].Path != "models/tiktoken/cl100k_base.tiktoken" || p.Files[3].URL == "" || p.Files[0].URL != "" {
+		t.Errorf("files = %+v", p.Files)
+	}
+
+	idx, err := remote.Index(p.Reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := idx.IndexManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if im.Annotations[AnnotationExtraFiles] != m.ExtraFilesDigest() || im.Annotations[AnnotationFiles] != "5" || im.Annotations[AnnotationLayers] != "2" {
+		t.Errorf("index annotations: %v", im.Annotations)
+	}
+	img, err := idx.Image(im.Manifests[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := layers[2].Uncompressed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range extra {
+		h.files["tiktoken/"+name] = c // what tarEntries compares the layer against
+	}
+	want := []string{root, "models/tiktoken/", "models/tiktoken/cl100k_base.tiktoken", "models/tiktoken/o200k_base.tiktoken"}
+	if got := tarEntries(t, rc, h); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("extra layer entries = %v, want %v", got, want)
+	}
+	cf, err := img.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := cf.History[len(cf.History)-1]; !strings.Contains(last.Comment, "extra files") || !strings.Contains(last.Comment, "layer 2 of 2") {
+		t.Errorf("history = %+v", last)
+	}
+	for name := range extra {
+		delete(h.files, "tiktoken/"+name)
+	}
+
+	files, err := Files(ctx, &m, o.Hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(files) != fmt.Sprint(p.Files) {
+		t.Errorf("Files() = %v, the build wrote %v", files, p.Files)
+	}
+	again, err := Publish(ctx, &m, o)
+	if err != nil || !again.Existed || again.Digest != p.Digest {
+		t.Errorf("second publication: %+v, %v", again, err)
+	}
+	// The checkpoint's own tag is untouched.
+	if d, err := remote.Head(plain.Reference); err != nil || d.Digest != plain.Digest {
+		t.Errorf("%s moved: %v %v", plain.Reference, d, err)
+	}
+}
+
+func TestPublishWithExtraFilesIsTheSameImageWithoutACheckpointImage(t *testing.T) {
+	// Where the checkpoint's image exists, its layers are reused; where it
+	// does not, the checkpoint is streamed. Both are the same image.
+	m, o, _ := setup(t)
+	ctx := context.Background()
+	if _, err := Publish(ctx, &m, o); err != nil {
+		t.Fatal(err)
+	}
+	withExtraFiles(t, &m, &o)
+	reused, err := Publish(ctx, &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := name.NewRepository(o.Registry.RegistryStr()+"/fresh/models", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Registry = fresh
+	var logs []string
+	o.Log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	built, err := Publish(ctx, &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(logs, "\n"), "reused") || len(built.Layers) != 2 {
+		t.Errorf("without a checkpoint image both layers must be streamed: %v, %v", built.Layers, logs)
+	}
+	if built.Digest != reused.Digest || fmt.Sprint(built.Files) != fmt.Sprint(reused.Files) {
+		t.Errorf("built %s with %v, reused %s with %v: the same specification must give the same image", built.Digest, built.Files, reused.Digest, reused.Files)
+	}
+}
+
+func TestPublishStreamsTheCheckpointWhenItsImageIsCutDifferently(t *testing.T) {
+	m, o, _ := setup(t)
+	ctx := context.Background()
+	o.MaxLayerSize = 2 << 20
+	if _, err := Publish(ctx, &m, o); err != nil {
+		t.Fatal(err)
+	}
+	withExtraFiles(t, &m, &o)
+	o.MaxLayerSize = 0
+	var logs []string
+	o.Log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	p, err := Publish(ctx, &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "the checkpoint is streamed") || len(p.Layers) != 2 {
+		t.Errorf("a checkpoint image in 3 layers must not be reused for a build of 1: %v, %v", p.Layers, logs)
+	}
+}
+
+func TestPublishRefusesAnExtraFileWithOtherBytes(t *testing.T) {
+	m, o, _ := setup(t)
+	withExtraFiles(t, &m, &o)
+	m.Spec.ExtraFiles[1].SHA256 = strings.Repeat("0", 64)
+	_, err := Publish(context.Background(), &m, o)
+	if err == nil || !strings.Contains(err.Error(), "the specification pins sha256:"+strings.Repeat("0", 64)) {
+		t.Fatalf("expected a hash mismatch, got %v", err)
+	}
+	_, extra, err := Contents(context.Background(), &m, o.Hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyExtraFiles(context.Background(), o.Hub, &m, extra); err == nil || !strings.Contains(err.Error(), "the specification pins") {
+		t.Errorf("VerifyExtraFiles: expected a hash mismatch, got %v", err)
+	}
+}
+
+func TestContentsRefusesAnExtraFileOnTheCheckpoint(t *testing.T) {
+	m, o, _ := setup(t)
+	withExtraFiles(t, &m, &o)
+	ctx := context.Background()
+	for p, want := range map[string]string{
+		"config.json":        "has a file or directory at that path",
+		"sub/dir":            "has a file or directory at that path",
+		"config.json/x":      "has a file at config.json",
+		"README.md":          "", // excluded from the image: free
+		"sub/dir/extra.json": "", // beside a checkpoint file: fine
+	} {
+		m.Spec.ExtraFiles[0].Path = p
+		_, _, err := Contents(ctx, &m, o.Hub)
+		if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+			t.Errorf("%s: got %v, want %q", p, err, want)
+		}
+	}
+}
+
+func TestLayerSizeIsTheStreamedSize(t *testing.T) {
+	m, o, _ := setup(t)
+	o.MaxLayerSize = 2 << 20
+	p, err := Publish(context.Background(), &m, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, _, err := Contents(context.Background(), &m, o.Hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, g := range groupFiles(checkpoint, o.MaxLayerSize) {
+		size, err := (&Layer{Files: g, ModTime: p.Created, Root: spec.MountPath}).Size()
+		if err != nil || size != p.Layers[i].Size {
+			t.Errorf("layer %d: Size() = %d, %v; streamed %d", i+1, size, err, p.Layers[i].Size)
 		}
 	}
 }

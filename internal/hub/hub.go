@@ -1,6 +1,7 @@
 // Package hub reads a Hugging Face repository at a pinned revision: the file
 // list with sizes and hashes, and each file as a stream that resumes where a
-// connection dropped.
+// connection dropped. A file from a pinned URL outside the Hub (an extra file
+// of a specification) streams the same way.
 package hub
 
 import (
@@ -67,6 +68,9 @@ type File struct {
 	// SHA256 is the hash the Hub stores for an LFS file; empty for a file the
 	// Hub keeps in git directly (the small configuration files).
 	SHA256 string
+	// URL, when set, is where the file is read from instead of the
+	// repository: an extra file of a specification, SHA256 its pinned hash.
+	URL string
 }
 
 // Revision is a commit of the repository.
@@ -140,13 +144,40 @@ func (c *Client) Tree(ctx context.Context, repository, revision string) ([]File,
 // from the last byte delivered; the stream ends with an error if the Hub
 // delivers a different number of bytes than the file has.
 func (c *Client) Open(ctx context.Context, repository, revision string, f File) io.ReadCloser {
-	return &resumingReader{
+	r := &resumingReader{
 		client: c,
 		ctx:    ctx,
 		url:    fmt.Sprintf("%s/%s/resolve/%s/%s", c.URL, repository, url.PathEscape(revision), escapePath(f.Path)),
 		name:   fmt.Sprintf("%s@%s:%s", repository, revision, f.Path),
 		size:   f.Size,
 	}
+	if f.URL != "" {
+		r.url, r.name = f.URL, f.URL
+	}
+	return r
+}
+
+// Stat returns the size of the file at a URL outside the Hub, from the
+// Content-Length of a HEAD request: a tar header states the size before the
+// first byte.
+func (c *Client) Stat(ctx context.Context, u string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("HEAD %s: %w", u, err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("HEAD %s: %s", u, resp.Status)
+	}
+	if resp.ContentLength < 0 {
+		return 0, fmt.Errorf("HEAD %s: the server states no Content-Length", u)
+	}
+	return resp.ContentLength, nil
 }
 
 func escapePath(p string) string {
@@ -208,7 +239,7 @@ type resumingReader struct {
 }
 
 // ErrShortFile reports a stream that ended before the file's size.
-var ErrShortFile = errors.New("the Hub delivered fewer bytes than the file has")
+var ErrShortFile = errors.New("the server delivered fewer bytes than the file has")
 
 func (r *resumingReader) Read(p []byte) (int, error) {
 	if r.closed {
@@ -290,7 +321,7 @@ func (r *resumingReader) open() error {
 		if resp.ContentLength >= 0 && resp.ContentLength != r.size {
 			_ = resp.Body.Close()
 			cancel()
-			return fmt.Errorf("%s: the Hub serves %d bytes, the tree lists %d", r.name, resp.ContentLength, r.size)
+			return fmt.Errorf("%s: %d bytes served, %d listed", r.name, resp.ContentLength, r.size)
 		}
 	case r.offset > 0 && resp.StatusCode == http.StatusPartialContent:
 		if !strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", r.offset)) {
