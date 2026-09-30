@@ -1,3 +1,4 @@
-# Affects all versions of archiver which is required by vault.
-# Taken from: https://github.com/giantswarm/opsctl/pull/1072/files#diff-bbe4a7fb12c43622bce7c6840c770e9995be614626a219942ca138403629cb69R1
-CVE-2019-10743 until=2021-10-17
+CVE-2026-41178 until=2026-10-30 # go.opentelemetry.io/otel@v1.41.0
+CVE-2026-81870 until=2026-10-30 # go.opentelemetry.io/otel@v1.41.0
+CVE-2026-56864 until=2026-10-30 # golang.org/x/mod@v0.39.0
+CVE-2026-56865 until=2026-10-30 # golang.org/x/mod@v0.39.0
