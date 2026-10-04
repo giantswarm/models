@@ -9,7 +9,7 @@ metadata:
 spec:
   huggingFace:
     repository: local-inference-lab/Qwen3.8-Flash-Next-NVFP4
-    revision: 7c4f1bc1a2d6847e0cbc01ac6b823f00251de8dd
+    revision: 6909a5bed089a48fa07e956d3915af2537de9368
   description: Qwen3.8-Flash-Next (125B MoE, 6B active) as the quantization-aware-distilled NVFP4 repack with the n-gram table in NVFP4; 98.6 GiB, 36 safetensors shards.
   # The Qwen community licence; not an SPDX identifier.
   license: LicenseRef-Qwen
