@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `kolibri-1`: Aleph Alpha's Kolibri-1 (78B MoE, 3.5B active, German and English) in its FP8 block quantization, 73.4 GiB ([giantswarm/agent-platform#804](https://github.com/giantswarm/agent-platform/issues/804)).
 - A `ModelImage` can declare `extraFiles`: files the checkpoint's repository does not carry, each by
   HTTPS URL, `sha256` and path under `/models`. They are streamed and hashed like the checkpoint's files
   into a layer of their own, a wrong hash fails the build (and `validate`, so the pull request), and the
