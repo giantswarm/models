@@ -1,0 +1,15 @@
+# Kolibri-1, Aleph Alpha's German/English mixture of experts: 78B parameters
+# with 3.5B active, FP8 weights in 128x128 blocks (embeddings, LM head, norms
+# and the MoE router in BF16), 73.4 GiB on disk as 32 safetensors shards. Served
+# by the agent platform's preset of the same name split across two 128 GB
+# unified-memory Blackwell nodes, on vLLM with Aleph Alpha's plugin.
+apiVersion: models.giantswarm.io/v1alpha1
+kind: ModelImage
+metadata:
+  name: kolibri-1
+spec:
+  huggingFace:
+    repository: Aleph-Alpha/Kolibri-1
+    revision: e52eb4627d11516b0c01de49210ab5a4e4061444
+  description: Kolibri-1 (78B MoE, 3.5B active, German and English) in Aleph Alpha's FP8 block quantization; 73.4 GiB, 32 safetensors shards.
+  license: Apache-2.0
