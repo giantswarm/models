@@ -10,6 +10,6 @@ metadata:
 spec:
   huggingFace:
     repository: Aleph-Alpha/Kolibri-1
-    revision: 258cae8ffffc8c12db670bdbc6ac01bcf8826c87
+    revision: 452723312f300bf9542cd425f9d39bf832c2af40
   description: Kolibri-1 (78B MoE, 3.5B active, German and English) in Aleph Alpha's FP8 block quantization; 73.4 GiB, 32 safetensors shards.
   license: Apache-2.0
