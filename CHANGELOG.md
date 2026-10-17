@@ -9,9 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-rc.1] - 2026-10-05
+
 ### Added
 
 - `kolibri-1`: Aleph Alpha's Kolibri-1 (78B MoE, 3.5B active, German and English) in its FP8 block quantization, 73.4 GiB ([giantswarm/agent-platform#804](https://github.com/giantswarm/agent-platform/issues/804)).
+
+## [0.5.0] - 2026-09-24
+
+### Added
+
 - A `ModelImage` can declare `extraFiles`: files the checkpoint's repository does not carry, each by
   HTTPS URL, `sha256` and path under `/models`. They are streamed and hashed like the checkpoint's files
   into a layer of their own, a wrong hash fails the build (and `validate`, so the pull request), and the
@@ -25,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of downloading them at the first request: new tags `6cee5e81ee83-7abb6426` and
   `b5c939de8f75-7abb6426`.
 
+## [0.4.0] - 2026-09-19
+
+### Added
+
 - The first batch of the September 2026 open-weight line-up, eight model images: `qwen3-8-27b-nvfp4`,
   `qwen3-6-35b-a3b-fp8`, `gpt-oss-20b` (without the repository's `original/` and `metal/` copies),
   `gemma-4-12b-qat-w4a16`, `qwen3-5-9b-fp8`, `qwen3-5-4b`, `gemma-4-31b-fp8` and `muse-glimmer-30b-fp8`.
@@ -32,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (without the repository's `original/` and `metal/` copies) and `mistral-small-4-nvfp4` (Mistral's own
   file format: consolidated safetensors, `params.json`, the tekken tokenizer).
 
-
-
-[Unreleased]: https://github.com/giantswarm/models/tree/main
+[Unreleased]: https://github.com/giantswarm/models/compare/v0.6.0-rc.1...HEAD
+[0.6.0-rc.1]: https://github.com/giantswarm/models/compare/v0.5.0...v0.6.0-rc.1
+[0.5.0]: https://github.com/giantswarm/models/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/giantswarm/models/releases/tag/v0.4.0
